@@ -184,22 +184,22 @@
       ctx.fillStyle = '#e8e8e8';
       ctx.font = font(L, 12, false);
       var obj = info.objective || 'Follow the dashed route to the marker.';
-      ctx.fillText(fitText(ctx, obj, z.w - 20), z.x + 10, z.y + 28);
+      ctx.fillText(fitText(ctx, obj, z.w - 20), z.x + 10, z.y + 26);
       if (info.next) {
         ctx.fillStyle = '#ffd166';
         ctx.font = font(L, 12, true);
-        ctx.fillText(fitText(ctx, 'NEXT: ' + info.next, z.w - 100), z.x + 10, z.y + 46);
+        ctx.fillText(fitText(ctx, 'NEXT: ' + info.next, z.w - 100), z.x + 10, z.y + 42);
       }
       var total = Math.max(1, info.total || 1);
       var done = clamp(info.stage || 0, 0, total);
       ctx.fillStyle = '#2a2a30';
-      ctx.fillRect(z.x + 10, z.y + z.h - 12, z.w - 20, 6);
+      ctx.fillRect(z.x + 10, z.y + z.h - 8, z.w - 20, 4);
       ctx.fillStyle = '#4caf50';
-      ctx.fillRect(z.x + 10, z.y + z.h - 12, (z.w - 20) * (done / total), 6);
+      ctx.fillRect(z.x + 10, z.y + z.h - 8, (z.w - 20) * (done / total), 4);
       ctx.fillStyle = '#8a8a92';
       ctx.font = font(L, 10, false);
       ctx.textAlign = 'right';
-      ctx.fillText('STAGE ' + (done + 1) + '/' + total, z.x + z.w - 10, z.y + 46);
+      ctx.fillText('STAGE ' + (done + 1) + '/' + total, z.x + z.w - 10, z.y + 42);
       ctx.textAlign = 'left';
     } else {
       ctx.fillStyle = '#ffd166';
