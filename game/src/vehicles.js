@@ -22,14 +22,27 @@
     return CFG.CARS[1];
   }
 
+  // Sprite detail tiers the renderer reads (drawCar: car.model.sprite).
+  // The roster in config.js carries a tier per model, but these two
+  // are pinned here, in the vehicle layer, so they survive a config
+  // re-roll: the Cometa GT is the hero car, tier 3 (racing stripe,
+  // spoiler, bright rings); the Olas is the only two-wheeler in the
+  // roster, tier 2, so a parked Olas still reads as a finished
+  // sprite instead of a base-tier box. (A running moped draws via
+  // drawBike, which reads the frame colour, not the tier — the tier
+  // is what the parked Olas gets on the drawCar path.)
+  var SPRITE_TIERS = { cometa: 3, olas: 2 };
+
   function makeCar(modelId, x, y, angle, opts) {
     var o = opts || {};
+    var model = modelById(modelId);
+    if (SPRITE_TIERS[model.id] !== undefined) model.sprite = SPRITE_TIERS[model.id];
     return {
-      model: modelById(modelId),
+      model: model,
       x: x, y: y, angle: angle || 0,
       speed: 0, damage: o.damage || 0,
       owned: !!o.owned, driver: o.driver || null,
-      police: !!o.police, color: o.color || modelById(modelId).color,
+      police: !!o.police, color: o.color || model.color,
       steering: 0
     };
   }

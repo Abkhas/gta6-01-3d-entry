@@ -312,6 +312,37 @@
     var standing = {};
     var srows = standingRows(state);
     for (var si = 0; si < srows.length; si++) standing[srows[si].district] = srows[si].value;
+    // The downtown highway: the avenue through Northgate's centre,
+    // drawn thick BEFORE the district fills and names so it reads
+    // as a highway slicing the city without striking through the
+    // NORTHGATE and PALM HEIGHTS labels (both sit on its line).
+    // A plain grid of 1.2px avenues is what made the map read as
+    // Pac-Man; the freeway is the one road with weight.
+    var hwX = null;
+    for (var di = 0; di < districts.length; di++) {
+      if (districts[di].id === 'northgate') {
+        var ncx = (districts[di].x0 + districts[di].x1) / 2;
+        for (var ai2 = 0; ai2 < city.avenues.length; ai2++) {
+          if (hwX === null || Math.abs(city.avenues[ai2] - ncx) < Math.abs(hwX - ncx)) hwX = city.avenues[ai2];
+        }
+      }
+    }
+    if (hwX !== null) {
+      ctx.strokeStyle = '#e8c37a';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(sx(hwX), y);
+      ctx.lineTo(sx(hwX), y + h);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(10,16,30,0.85)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([7, 7]);
+      ctx.beginPath();
+      ctx.moveTo(sx(hwX), y);
+      ctx.lineTo(sx(hwX), y + h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
     for (var d = 0; d < districts.length; d++) {
       var dist = districts[d];
       ctx.fillStyle = (dist.accent || '#ffd166') + '55';
@@ -342,6 +373,15 @@
       ctx.moveTo(x, sy(city.streets[i]));
       ctx.lineTo(x + w, sy(city.streets[i]));
       ctx.stroke();
+    }
+    if (hwX !== null) {
+      // Highway tag at the top of the freeway, clear of the
+      // district names below it.
+      ctx.fillStyle = '#e8c37a';
+      ctx.font = 'bold 10px system-ui, sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText('NORTHGATE FWY', sx(hwX) - 8, y + 12);
+      ctx.textAlign = 'left';
     }
     for (i = 0; i < (city.landmarks || []).length; i++) {
       var lm = city.landmarks[i];
@@ -405,9 +445,20 @@
       ctx.rotate(Math.PI / 4);
       ctx.fillRect(-7, -7, 14, 14);
       ctx.restore();
+      // Label ABOVE the marker on a dark plate: to the right it
+      // runs into the next district's name — the Boardwalk waypoint
+      // sits on the Docks' label line.
+      var wLabel = 'WAYPOINT · ' + (state.waypoint.label || '').toUpperCase();
       ctx.fillStyle = '#ffd166';
       ctx.font = 'bold 11px system-ui, sans-serif';
-      ctx.fillText('WAYPOINT · ' + (state.waypoint.label || '').toUpperCase(), sx(state.waypoint.x) + 12, sy(state.waypoint.y) + 4);
+      var wtw = ctx.measureText(wLabel).width;
+      var wtx = sx(state.waypoint.x), wty = sy(state.waypoint.y) - 32;
+      ctx.fillStyle = 'rgba(8,18,14,0.85)';
+      ctx.fillRect(wtx - wtw / 2 - 5, wty - 11, wtw + 10, 15);
+      ctx.fillStyle = '#ffd166';
+      ctx.textAlign = 'center';
+      ctx.fillText(wLabel, wtx, wty);
+      ctx.textAlign = 'left';
     }
     if (state.police && state.police.units) {
       for (var u = 0; u < state.police.units.length; u++) {
@@ -975,6 +1026,14 @@
     var W = canvas.width, H = canvas.height;
     ctx.fillStyle = 'rgba(10,16,30,0.78)';
     ctx.fillRect(0, 0, W, H);
+    // The header band is fully opaque, down past the column tops:
+    // the wash above lets the live HUD ghost through — the mission
+    // and player panels top-left, the money and crew cards
+    // top-right — and those HUD panels sit behind the first ~140 px
+    // of the columns, not just behind the title. The columns draw
+    // over the band, so nothing the dashboard owns is lost.
+    ctx.fillStyle = 'rgba(10,16,30,1)';
+    ctx.fillRect(0, 0, W, 240);
     headline(ctx, 'PALMA VERDE — MAP & STATS', 24, 18, 24, '#ffd166');
     bodyText(ctx, clockStr(state.clockMinutes) + '  ·  ' + (state.district ? state.district.name.toUpperCase() : 'PALMA VERDE') + '  ·  ' + moneyStr(state.player.money), 24, 48, 13, '#e8e8e8');
     var endY = drawSystemsColumns(ctx, state, city, canvas, opts, 96, 520, true);

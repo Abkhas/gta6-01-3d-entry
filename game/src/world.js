@@ -323,12 +323,17 @@
       if (rng() < 0.6) props.push({ x: BEACH.beachRoadX + 40, y: y + 40, kind: 'bench' });
     }
 
-    // Citrus Lane market: stalls in two parallel aisles inside the
-    // block between the 1260 and 1580 streets, so shoppers walk a
-    // lane between the rows instead of past scattered boxes.
-    for (x = 700; x <= 2000; x += 82) {
-      props.push({ x: x, y: 1380, kind: 'stall' });
-      props.push({ x: x + 40, y: 1462, kind: 'stall' });
+    // Citrus Lane market: stalls in two rows flanking the 1320
+    // avenue — the market avenue the night crowd runs down — so
+    // shoppers walk a lane between the rows instead of past
+    // scattered boxes. The rows sit on the kerbs (±30 from the
+    // centreline), clear of the building footprints: props draw
+    // before buildings, so a stall inside a block is painted over
+    // and the market reads as a street canyon. The old rows at
+    // y1380/1462 sat inside the block and were invisible.
+    for (y = 980; y <= 1820; y += 82) {
+      props.push({ x: 1290, y: y, kind: 'stall' });
+      props.push({ x: 1350, y: y, kind: 'stall' });
     }
 
     // The Docks: shipping containers in rows and crates stacked by
@@ -357,7 +362,10 @@
     }
 
     var landmarks = [
-      { kind: 'wheel', name: 'Palma Wheel', x: 330, y: 1500, r: 46, solid: true, height: 150 },
+      // One wheel in the city: it stands on the seaward end of Venn
+      // Pier, drawn by the renderer's 'pier' branch. The second
+      // wheel that used to stand on the sand here is gone — two
+      // wheels read as a copy-paste, not a landmark.
       { kind: 'pier', name: 'Venn Pier', x: 150, y: 1740, r: 30, solid: false, length: 170 },
       { kind: 'bridge', name: 'Marina Bridge', x: 780, y: 210, r: 60, solid: false, span: 260 },
       { kind: 'tower', name: 'Faro Tower', x: 3600, y: 620, r: 40, solid: true, height: 260 },
@@ -368,7 +376,9 @@
       player: { x: 634, y: 2060 },
       cometa: { x: 1560, y: 640 },
       pier: { x: 160, y: 1740 },
-      wheel: { x: 400, y: 1500 }
+      // Under the pier wheel now: the only wheel stands on the pier,
+      // so the wheel spawn is the pier deck by its seaward end.
+      wheel: { x: 150, y: 1740 }
     };
 
     var city = {
