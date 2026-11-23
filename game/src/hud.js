@@ -489,7 +489,12 @@
     ctx.font = font(L, 15, true);
     ctx.textAlign = 'left';
     var dName = state.district ? state.district.name.toUpperCase() : 'PALMA VERDE';
-    ctx.fillText(clockStr(state.clockMinutes) + '  ·  ' + dName, z.x + 8, z.y + 6);
+    // Raised baseline: textBaseline is 'top' here, so glyphs run DOWN
+    // from this y — the old +6 put the glyph bottoms under the minimap
+    // frame on the shorter live canvas (599 vs the 720 design frame),
+    // and the frame covered the lower half of the line. -5 lifts the
+    // whole line clear of the frame with padding to spare.
+    ctx.fillText(clockStr(state.clockMinutes) + '  ·  ' + dName, z.x + 8, z.y - 5);
     ctx.fillStyle = '#ffd166';
     ctx.font = font(L, 12, false);
     var station = CFG.RADIO[state.radioStation % CFG.RADIO.length];
@@ -508,8 +513,11 @@
     function sx(wx) { return mx + (wx / city.width) * mw; }
     function sy(wy) { return my + (wy / city.height) * mh; }
     var bch = beach();
+    // Backing flush with the map top (no 4px outset above my): on the
+    // shorter live canvas the outset put the frame's top edge against
+    // the clock line above it. Map content itself is untouched.
     ctx.fillStyle = 'rgba(8,18,14,0.80)';
-    ctx.fillRect(mx - 4, my - 4, mw + 8, mh + 8);
+    ctx.fillRect(mx - 4, my, mw + 8, mh + 4);
     // Ocean, then the wide sand band, along the west edge.
     ctx.fillStyle = '#1f6f8f';
     ctx.fillRect(mx, my, sx(bch.oceanX1) - mx, mh);
@@ -641,7 +649,9 @@
     ctx.textAlign = 'left';
     ctx.strokeStyle = 'rgba(255,209,102,0.8)';
     ctx.lineWidth = 1.5;
-    ctx.strokeRect(mx - 4, my - 4, mw + 8, mh + 8);
+    // Frame flush with the map top (see the backing above): its old
+    // my-4 top edge sat against the clock line on short canvases.
+    ctx.strokeRect(mx - 4, my, mw + 8, mh + 4);
   }
 
   // Tab-hold weapon wheel (state.weaponWheel, set by player.js).
