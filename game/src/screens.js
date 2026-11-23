@@ -323,7 +323,7 @@
       drawSlotCard(ctx, slots[i] || { slot: i + 1, empty: true }, x0 + i * (cw + gap), H * 0.38, cw, 110, i === selected);
     }
     headline(ctx, 'PRESS ENTER TO START  ·  ARROWS PICK A SLOT', W / 2, H * 0.38 + 140, 17, '#fff', 'center');
-    bodyText(ctx, 'WASD walk / drive   ·   E enter & exit car   ·   Mouse aim, click fire   ·   R reload   ·   Q radio   ·   Esc pause   ·   F9 save', W / 2 - 330, H * 0.38 + 176, 14, '#c9d2e0');
+    bodyText(ctx, 'WASD walk / drive   ·   E enter & exit car / start mission   ·   Mouse aim, click fire   ·   R reload   ·   Q radio   ·   Z / X / V crew   ·   Esc pause   ·   F9 save', W / 2 - 330, H * 0.38 + 176, 14, '#c9d2e0');
     ctx.textAlign = 'left';
     bodyText(ctx, clockStr(state.clockMinutes) + '  ·  ' + (state.district ? state.district.name.toUpperCase() : 'PALMA VERDE') + '  ·  10 MISSIONS  ·  7 DISTRICTS  ·  3 RADIO STATIONS', 24, H - 24, 13, '#8a8a92');
   }
@@ -506,7 +506,7 @@
       var lines = [
         'WASD / Arrows — walk and drive',
         'E — enter & exit car    ·    Mouse — aim    ·    Click — fire    ·    R — reload',
-        'Q — switch radio station    ·    1 / 2 / 3 — call Tuck / Ines / Kip',
+        'Q — switch radio station    ·    Z / X / V — call Tuck / Ines / Kip',
         'Esc / P — pause    ·    F9 — save to slot 1    ·    M — set waypoint on the mission marker',
         'RADIO: Onda 98.4  ·  Sol FM  ·  Static Coast — synthesized in-game, no audio files.',
         'SUBTITLES: on    ·    CAMERA: follow, 2.5D oblique    ·    LANGUAGE: English'

@@ -456,7 +456,7 @@
 
     return {
       render: render, resize: resize, project: project,
-      addShake: addShake, addFlash: addFlash,
+      addShake: addShake, addFlash: addFlash, drawHeli: drawHeli,
       modeForMinutes: modeForMinutes, shade: shade
     };
   }

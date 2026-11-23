@@ -186,6 +186,34 @@ try {
   const heli = W.PalmaShots.renderSync(canvas, 'heli', 4);
   check('shot 4 uses the real Gull, no fallback',
     heli.heliUsedGull === true && heli.gullFallback === false);
+
+  // Rank sync: addRp re-derives a NUMERIC rank index from the RP total
+  // (the live loop calls it with zero after completeMission pays RP).
+  const rankProbe = { rp: 250, rank: 0 };
+  const bumped = W.PalmaProgress.addRp(rankProbe, 200);
+  check('addRp maps 450 RP to rank index 1 Wheelman',
+    rankProbe.rank === 1 && bumped.rankedUp && bumped.rankedUp.name === 'Wheelman',
+    'rank ' + rankProbe.rank);
+  const zeroProbe = { rp: 450, rank: 0 };
+  W.PalmaProgress.addRp(zeroProbe, 0);
+  check('addRp with zero still derives rank 1 from 450 RP', zeroProbe.rank === 1, 'rank ' + zeroProbe.rank);
+
+  // Stage reporters the live loop depends on: a shoot stage clears
+  // when its foes are down, a race stage passes on a win and fails
+  // the mission on a loss.
+  const fight = { missions: { current: 'the-drop', stage: 2, completed: ['the-debt', 'hot-wheels', 'boardwalk-heat'] }, player: { money: 0 }, rp: 0, respect: 0 };
+  const clearedOut = W.PalmaMissions.reportCombat(fight, { foesDown: () => true });
+  check('shoot stage clears when foes are down',
+    clearedOut.ok && fight.missions.completed.includes('the-drop'),
+    clearedOut.reason || '');
+  const race = { missions: { current: 'street-kings', stage: 1, completed: ['the-debt', 'hot-wheels', 'boardwalk-heat', 'the-drop', 'sky-courier', 'old-town-score'] }, player: { money: 0 }, rp: 0, respect: 0 };
+  const won = W.PalmaMissions.reportRace(race, {}, true);
+  check('race stage advances on a win', won.ok && race.missions.stage === 2);
+  const lost = { missions: { current: 'street-kings', stage: 1, completed: ['the-debt', 'hot-wheels', 'boardwalk-heat', 'the-drop', 'sky-courier', 'old-town-score'] }, player: { money: 0 }, rp: 0, respect: 0 };
+  const lostRes = W.PalmaMissions.reportRace(lost, {}, false);
+  check('race stage fails the mission on a loss',
+    lostRes.ok && lostRes.failed && lost.missions.current === null,
+    lostRes.reason || '');
 } catch (e) {
   check('self-test runs without an unexpected throw', false, e.stack.split('\n')[0]);
 }

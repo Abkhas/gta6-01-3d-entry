@@ -97,6 +97,9 @@ try {
   check('Gull parked on the pad', !!state.gull && state.gull.kind === 'heli' && state.gull.name === 'Gull');
   key('Enter', true);
   check('game starts and runs 10 frames', state.screen === 'playing' && frames(10));
+  check('mission 1 auto-starts on leaving the title',
+    state.missions.current === 'the-debt' && !!state.missionTarget,
+    'current ' + state.missions.current);
 
   // Drive: step to the nearest parked car, board it, drive forward.
   let car = null, best = Infinity;
@@ -116,26 +119,42 @@ try {
   key('e', true);
   check('E exits the car', state.player.vehicle === null);
 
-  // Mission 1 end to end through the stage reporters.
-  const hooks = { atTarget: () => true, parcelHanded: () => true, foesDown: () => true };
-  const money0 = state.player.money, rp0 = state.rp;
-  const started = W.PalmaMissions.startMission(state, 'the-debt', hooks);
-  check('mission 1 starts', started.ok, started.reason || '');
+  // Mission 1 end to end through the live loop: Rey is moved to each
+  // stage marker (the test moves him; the arrival, handoff and rank
+  // logic all run through the real per-frame path), E for the handoff.
+  // RP is seeded at 300 so the 150 from mission 1 crosses the 400
+  // Wheelman line and the rank mapping is exercised for real.
+  const money0 = state.player.money;
+  state.rp = 300;
+  check('mission 1 already running from the title', state.missions.current === 'the-debt');
   let guard = 0;
   while (state.missions.current && guard++ < 10) {
     const stage = W.PalmaMissions.currentStage(state);
-    let r = null;
-    if (stage.type === 'drive-to' || stage.type === 'pickup' || stage.type === 'escort') {
-      r = W.PalmaMissions.reportArrival(state, hooks);
-    } else if (stage.type === 'deliver') r = W.PalmaMissions.reportDelivery(state, hooks);
-    else if (stage.type === 'shoot') r = W.PalmaMissions.reportCombat(state, hooks);
-    else if (stage.type === 'race') r = W.PalmaMissions.reportRace(state, hooks, true);
-    if (!r || !r.ok) break;
+    if (!stage) break;
+    state.player.x = state.missionTarget.x;
+    state.player.y = state.missionTarget.y;
+    if (stage.type === 'deliver') key('e', true);
+    if (!frames(5)) break;
   }
-  check('mission 1 completes', state.missions.completed.includes('the-debt'));
+  check('mission 1 completes by live play', state.missions.completed.includes('the-debt'));
   check('mission 1 pays $500 and 150 RP',
-    state.player.money === money0 + 500 && state.rp === rp0 + 150,
+    state.player.money === money0 + 500 && state.rp === 450,
     'money ' + state.player.money + ' rp ' + state.rp);
+  check('rank advances to Wheelman after mission 1',
+    state.rank === 1 && W.PalmaConfig.RANKS[state.rank].name === 'Wheelman',
+    'rank ' + state.rank);
+  check('mission passed banner is up',
+    !!(state.banner && state.banner.kind === 'MISSION PASSED'));
+  key('Enter', true);
+  check('Enter dismisses the banner', state.banner === null);
+  // Crew: Z calls Tuck, who drops a star for 25 RP, then cools down.
+  state.wanted = 2;
+  key('z', true);
+  check('Z calls Tuck, wanted drops a star',
+    state.wanted === 1 && state.crew.tuck.cooldown > 0,
+    'wanted ' + state.wanted);
+  key('z', true);
+  check('Z again while cooling down changes nothing', state.wanted === 1);
 
   // Wanted 4: dispatch board full, AIR-1 overhead, loop keeps running.
   W.PalmaPolice.stageChase(state, city, 4);
@@ -143,6 +162,15 @@ try {
   check('dispatch rows = 5 at 4 stars', rows.length === 5, 'got ' + rows.length);
   check('AIR-1 spotlight row present',
     rows.some((r) => r.callsign === 'AIR-1' && r.tactic === 'SPOTLIGHT'));
+  // AIR-1 wears a drawn body now, not just a cone: the overlay calls
+  // the renderer's drawHeli once for the police helicopter.
+  const renderer = W.PalmaRender.makeRenderer(canvas);
+  check('renderer exposes drawHeli', typeof renderer.drawHeli === 'function');
+  let heliDraws = 0;
+  const realHeli = renderer.drawHeli;
+  renderer.drawHeli = function () { heliDraws++; return realHeli.apply(renderer, arguments); };
+  W.PalmaPolice.drawOverlay(state, city, canvas, renderer, 'golden');
+  check('AIR-1 body drawn via drawHeli', heliDraws === 1, 'draws ' + heliDraws);
   check('30 frames at 4 stars without a throw', frames(30));
   check('dispatch still 5 rows after the loop',
     W.PalmaPolice.dispatchRows(state).length === 5);

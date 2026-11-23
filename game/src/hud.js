@@ -162,9 +162,9 @@
   function drawCrew(ctx, state, canvas) {
     var crew = state.crew || {};
     var defs = [
-      { key: 'tuck', name: 'TUCK', job: 'Swap Plates', num: '1' },
-      { key: 'ines', name: 'INES', job: 'Quick Fix', num: '2' },
-      { key: 'kip', name: 'KIP', job: 'Eyes Out', num: '3' }
+      { key: 'tuck', name: 'TUCK', job: 'Swap Plates', num: 'Z' },
+      { key: 'ines', name: 'INES', job: 'Quick Fix', num: 'X' },
+      { key: 'kip', name: 'KIP', job: 'Eyes Out', num: 'V' }
     ];
     var x = 14, y = 122;
     for (var i = 0; i < defs.length; i++) {
@@ -441,7 +441,7 @@
   function draw(state, city, canvas, mode, renderer) {
     var ctx = canvas.getContext('2d');
     if (window.PalmaPolice && window.PalmaPolice.drawOverlay) {
-      window.PalmaPolice.drawOverlay(state, city, canvas, renderer);
+      window.PalmaPolice.drawOverlay(state, city, canvas, renderer, mode);
     }
     ctx.save();
     ctx.textBaseline = 'top';

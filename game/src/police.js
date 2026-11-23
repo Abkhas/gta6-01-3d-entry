@@ -186,21 +186,30 @@
   }
 
   // The helicopter and its spotlight cone, drawn over the world after
-  // the renderer finishes, before the HUD panels go on top.
-  function drawOverlay(state, city, canvas, renderer) {
+  // the renderer finishes, before the HUD panels go on top. AIR-1
+  // wears the same drawn body as the player's Gull — the renderer's
+  // drawHeli, in police dark — so the two helicopters read as the
+  // same machine in different hands. The cone is anchored at the
+  // lifted body, not at the ground point, so cone and body meet.
+  function drawOverlay(state, city, canvas, renderer, mode) {
     var pol = state.police;
-    if (!pol || !pol.heli || !renderer) return;
+    if (!pol || !pol.heli || !renderer || !renderer.drawHeli) return;
     var ctx = canvas.getContext('2d');
     var heli = pol.heli;
+    // drawHeli lifts its body by altitude * 2.4 * zoom. AIR-1 flies
+    // at one fixed show height, so the cone apex and the body agree.
+    var showAlt = 16;
+    var lift = showAlt * 2.4 * state.cam.zoom;
     var hp = renderer.project(state.cam, heli.x, heli.y);
+    var top = { x: hp.x, y: hp.y - lift };
     var pp = renderer.project(state.cam, state.player.x, state.player.y);
-    var g = ctx.createLinearGradient(hp.x, hp.y, pp.x, pp.y);
+    var g = ctx.createLinearGradient(top.x, top.y, pp.x, pp.y);
     g.addColorStop(0, 'rgba(255,240,180,0.30)');
     g.addColorStop(1, 'rgba(255,240,180,0.08)');
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.moveTo(hp.x - 10, hp.y);
-    ctx.lineTo(hp.x + 10, hp.y);
+    ctx.moveTo(top.x - 10, top.y);
+    ctx.lineTo(top.x + 10, top.y);
     ctx.lineTo(pp.x + 46, pp.y + 30);
     ctx.lineTo(pp.x - 46, pp.y + 30);
     ctx.closePath();
@@ -209,22 +218,14 @@
     ctx.beginPath();
     ctx.ellipse(pp.x, pp.y + 10, 52, 26, 0, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = '#1d2733';
-    ctx.beginPath();
-    ctx.ellipse(hp.x, hp.y, 26, 12, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#c8d4e0';
-    ctx.fillRect(hp.x - 40, hp.y - 2, 16, 4);
-    ctx.strokeStyle = 'rgba(200,212,224,0.7)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(hp.x - 34, hp.y - 4);
-    ctx.lineTo(hp.x + 34, hp.y - 4);
-    ctx.stroke();
+    renderer.drawHeli(state.cam, {
+      x: heli.x, y: heli.y, altitude: showAlt,
+      angle: heli.angle, rotor: (state.time || 0) * 9, color: '#23262f'
+    }, mode || 'golden');
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 11px system-ui, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('AIR-1', hp.x, hp.y - 16);
+    ctx.fillText('AIR-1', top.x, top.y - 16);
     ctx.textAlign = 'left';
   }
 

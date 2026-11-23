@@ -13,7 +13,7 @@
 // are still a stranger.
 //
 // State shape used here:
-//   state.rp, state.rank (rank id string), state.respect (0-100),
+//   state.rp, state.rank (rank index into RANKS), state.respect (0-100),
 //   state.standing = { Marina: 0, 'Old Town': 0, ... } (0-100 each),
 //   state.missions.completed, state.activitiesDone (count),
 //   state.collectibles.found, state.properties.owned, state.completion.
@@ -69,7 +69,10 @@ function addRp(state, amount) {
   const before = rankForRp(state.rp);
   state.rp += amount;
   const after = rankForRp(state.rp);
-  state.rank = after.id;
+  // Rank stays a NUMBER index everywhere the game reads it (HUD chip,
+  // pause screens, shot staging): the id string lives only in the
+  // save-slot snapshot, never in live state.
+  state.rank = RANKS.indexOf(after);
   return {
     rp: state.rp,
     rank: after,
