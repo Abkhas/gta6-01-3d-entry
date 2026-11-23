@@ -268,7 +268,13 @@
     var z = L.dispatch;
     var shown = rows.slice(0, 5);
     var rowH = 24 * L.sy;
-    var h = (28 + shown.length * 24) * L.sy + 6 * L.sy;
+    // The MORE line sits one row below the last unit row, and the HUD
+    // draws with textBaseline 'top', so its glyphs run DOWN from its y.
+    // Budget its full 11px font height plus 8px of bottom padding, or
+    // its lower half lands outside the panel and reads as clipped.
+    var hasMore = rows.length > shown.length;
+    var moreH = hasMore ? 19 : 0;
+    var h = (28 + shown.length * 24 + 6 + moreH) * L.sy;
     panel(ctx, z.x, z.y, z.w, h, 0.62);
     ctx.fillStyle = '#ff5a4a';
     ctx.font = font(L, 13, true);
@@ -292,16 +298,20 @@
       ctx.textAlign = 'left';
       ctx.fillStyle = '#fff';
       ctx.font = font(L, 12, true);
-      ctx.fillText(fitText(ctx, r.callsign, 58 * L.sx), z.x + 34 * L.sx, ry);
+      // Callsigns run to 78px at full scale (CORRIENTE-3, 12px bold)
+      // and 85px with a two-digit number, so the name column gets 88px
+      // and the tactic pill moves right to x126 — inside the same
+      // 252px panel, so no call-sign is ever cut mid-word.
+      ctx.fillText(fitText(ctx, r.callsign, 88 * L.sx), z.x + 34 * L.sx, ry);
       var pill = r.tactic;
       ctx.font = font(L, 10, true);
       var pw = 8 + ctx.measureText(pill).width;
       ctx.fillStyle = TACTIC_COLORS[pill] || '#8a8a92';
       ctx.beginPath();
-      ctx.roundRect(z.x + 96 * L.sx, ry - 2, pw, 16 * L.sy, 8);
+      ctx.roundRect(z.x + 126 * L.sx, ry - 2, pw, 16 * L.sy, 8);
       ctx.fill();
       ctx.fillStyle = pill === 'SPOTLIGHT' ? '#222' : '#fff';
-      ctx.fillText(pill, z.x + 100 * L.sx, ry + 1);
+      ctx.fillText(pill, z.x + 130 * L.sx, ry + 1);
       ctx.fillStyle = '#ffd166';
       ctx.font = font(L, 12, false);
       ctx.textAlign = 'right';
