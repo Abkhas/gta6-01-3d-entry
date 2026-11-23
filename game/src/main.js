@@ -155,6 +155,7 @@
       if (k === 'r' && state.screen === 'playing') window.PalmaPlayer.reloadWeapon(state);
       if (k === 'q' && state.screen === 'playing') {
         state.radioStation = (state.radioStation + 1) % CFG.RADIO.length;
+        if (window.PalmaAudio) window.PalmaAudio.jingle();
       }
       if (k === 'f5') { /* let the browser reload */ }
       if ((k === 'f9' || k === 'f6') && state.screen === 'playing') saveGame(state, 1);
@@ -171,6 +172,8 @@
         if (state.screen === 'playing' && !state.player.vehicle) {
           state.player.aiming = true;
           var res = window.PalmaPlayer.fireWeapon(state, renderer);
+          state.lastShotAt = { x: state.player.x, y: state.player.y, t: state.time };
+          if ((res.hit || res.reason === 'miss') && window.PalmaAudio) window.PalmaAudio.gunshot();
           if (res.hit && state.wanted < 2) state.wanted = Math.max(state.wanted, 2);
           else if (!res.hit && res.reason === 'miss' && state.wanted === 0) state.wanted = 1;
         }
@@ -229,21 +232,18 @@
           state.wantedTimer = (state.wantedTimer || 0) + dt;
           if (state.wantedTimer > 45) { state.wanted--; state.wantedTimer = 0; }
         } else state.wantedTimer = 0;
-        // Pedestrians drift along their heading; wrap at the map edge.
-        for (var i = 0; i < state.peds.length; i++) {
-          var pd = state.peds[i];
-          pd.x += Math.cos(pd.angle) * pd.speed * dt;
-          pd.y += Math.sin(pd.angle) * pd.speed * dt;
-          if (pd.x < 320 || pd.x > city.width - 40 || pd.y < 40 || pd.y > city.height - 40) {
-            pd.angle += Math.PI / 2;
-          }
-        }
+        // Street life, police response and sound all run through the
+        // Block B systems; traffic owns the pedestrians now.
+        if (window.PalmaTraffic) window.PalmaTraffic.update(state, city, dt);
+        if (window.PalmaPolice) window.PalmaPolice.update(state, city, dt);
+        if (window.PalmaAudio) window.PalmaAudio.tick(state, dt);
         state.district = WORLD.districtAt(city, p.x, p.y);
         window.PalmaPlayer.followCamera(state.cam, state, canvas.width, canvas.height, dt);
       }
 
       var mode = renderer.render(state, city, state.cam, state.time);
-      drawHud(state, mode);
+      if (window.PalmaHud) window.PalmaHud.draw(state, city, canvas, mode, renderer);
+      else drawHud(state, mode);
       if (state.screen === 'title') drawTitle(state);
       if (state.screen === 'paused') drawPaused(state);
       requestAnimationFrame(step);
