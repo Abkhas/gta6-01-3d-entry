@@ -34,9 +34,15 @@ async function handIn(): Promise<void> {
   await mkdir(outDir, { recursive: true });
   await cp(gameDir, path.join(outDir, 'game'), { recursive: true });
   await copyIfPresent(shotsDir, path.join(outDir, 'screenshots'));
-  const dossier = await buildDossier(gameDir, shotsDir);
-  const text = typeof dossier === 'string' ? dossier : JSON.stringify(dossier);
-  await writeFile(path.join(outDir, 'dossier.json'), text, 'utf8');
+  const caps = {
+    text_max_bytes: 163840,
+    screenshots: { max: 4, max_bytes: 262144 },
+    game_max_files: 993,
+    game_max_bytes: 50331648,
+    game_path_max_bytes: 1000,
+  };
+  const dossier = buildDossier(REPO_ROOT, caps);
+  await writeFile(path.join(outDir, 'dossier.json'), dossier);
 }
 
 handIn().catch((err: unknown) => {
