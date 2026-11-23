@@ -92,25 +92,28 @@
 
   // The car roster. The Cometa GT is Rey's prize: bright coral red,
   // fastest in the city, and the target of mission two.
+  // Sprite detail tier per model (1 = body + cabin + wheels, 2 = + glass,
+  // grille, mirrors and light cones, 3 = full hero detail: stripe,
+  // spoiler, hubcaps, bright lamps). The Cometa GT is the only tier 3.
   var CARS = [
-    { id: 'cometa', name: 'Cometa GT', color: '#ff4f3d', top: 176, accel: 0.34, grip: 0.92, price: 45000, seats: 2 },
-    { id: 'vela', name: 'Vela Sedan', color: '#3d7ea6', top: 132, accel: 0.22, grip: 0.86, price: 12000, seats: 4 },
-    { id: 'brisa', name: 'Brisa Hatch', color: '#e8c53a', top: 118, accel: 0.24, grip: 0.88, price: 6000, seats: 4 },
-    { id: 'halcon', name: 'Halcon Coupe', color: '#2b2f38', top: 158, accel: 0.30, grip: 0.90, price: 18000, seats: 2 },
-    { id: 'faro', name: 'Faro Pickup', color: '#7a8a6a', top: 124, accel: 0.20, grip: 0.80, price: 14000, seats: 2 },
-    { id: 'tiburon', name: 'Tiburon Van', color: '#c9c2b4', top: 108, accel: 0.16, grip: 0.78, price: 9000, seats: 6 },
-    { id: 'monzon', name: 'Monzon Taxi', color: '#f2a007', top: 128, accel: 0.22, grip: 0.85, price: 11000, seats: 4 },
-    { id: 'playa', name: 'Playa Convertible', color: '#e86a92', top: 148, accel: 0.28, grip: 0.87, price: 22000, seats: 2 },
-    { id: 'corriente', name: 'Corriente SUV', color: '#4a6b4f', top: 136, accel: 0.21, grip: 0.84, price: 20000, seats: 5 },
-    { id: 'duna', name: 'Duna Muscle', color: '#8c2f2f', top: 164, accel: 0.31, grip: 0.82, price: 26000, seats: 2 },
-    { id: 'arena', name: 'Arena Roadster', color: '#e07840', top: 152, accel: 0.29, grip: 0.89, price: 19000, seats: 2 },
-    { id: 'costa', name: 'Costa Cruiser', color: '#2e6f7e', top: 126, accel: 0.21, grip: 0.85, price: 13000, seats: 4 },
-    { id: 'palmera', name: 'Palmera Wagon', color: '#6a8f5a', top: 116, accel: 0.19, grip: 0.83, price: 10000, seats: 5 },
-    { id: 'luna', name: 'Luna Coupe', color: '#c9c2d4', top: 150, accel: 0.27, grip: 0.88, price: 21000, seats: 2 },
-    { id: 'estrella', name: 'Estrella Sport', color: '#3a5a8c', top: 168, accel: 0.32, grip: 0.91, price: 30000, seats: 2 },
-    { id: 'norte', name: 'Norte Sedan', color: '#8c8a92', top: 130, accel: 0.22, grip: 0.86, price: 11500, seats: 4 },
-    { id: 'sierra', name: 'Sierra Truck', color: '#6b4a26', top: 122, accel: 0.20, grip: 0.79, price: 15000, seats: 2 },
-    { id: 'olas', name: 'Olas Buggy', color: '#e8d27a', top: 142, accel: 0.26, grip: 0.80, price: 16000, seats: 2 }
+    { id: 'cometa', name: 'Cometa GT', color: '#ff4f3d', top: 176, accel: 0.34, grip: 0.92, price: 45000, seats: 2, sprite: 3 },
+    { id: 'vela', name: 'Vela Sedan', color: '#3d7ea6', top: 132, accel: 0.22, grip: 0.86, price: 12000, seats: 4, sprite: 1 },
+    { id: 'brisa', name: 'Brisa Hatch', color: '#e8c53a', top: 118, accel: 0.24, grip: 0.88, price: 6000, seats: 4, sprite: 1 },
+    { id: 'halcon', name: 'Halcon Coupe', color: '#2b2f38', top: 158, accel: 0.30, grip: 0.90, price: 18000, seats: 2, sprite: 2 },
+    { id: 'faro', name: 'Faro Pickup', color: '#7a8a6a', top: 124, accel: 0.20, grip: 0.80, price: 14000, seats: 2, sprite: 1 },
+    { id: 'tiburon', name: 'Tiburon Van', color: '#c9c2b4', top: 108, accel: 0.16, grip: 0.78, price: 9000, seats: 6, sprite: 1 },
+    { id: 'monzon', name: 'Monzon Taxi', color: '#f2a007', top: 128, accel: 0.22, grip: 0.85, price: 11000, seats: 4, sprite: 2 },
+    { id: 'playa', name: 'Playa Convertible', color: '#e86a92', top: 148, accel: 0.28, grip: 0.87, price: 22000, seats: 2, sprite: 2 },
+    { id: 'corriente', name: 'Corriente SUV', color: '#4a6b4f', top: 136, accel: 0.21, grip: 0.84, price: 20000, seats: 5, sprite: 1 },
+    { id: 'duna', name: 'Duna Muscle', color: '#8c2f2f', top: 164, accel: 0.31, grip: 0.82, price: 26000, seats: 2, sprite: 2 },
+    { id: 'arena', name: 'Arena Roadster', color: '#e07840', top: 152, accel: 0.29, grip: 0.89, price: 19000, seats: 2, sprite: 2 },
+    { id: 'costa', name: 'Costa Cruiser', color: '#2e6f7e', top: 126, accel: 0.21, grip: 0.85, price: 13000, seats: 4, sprite: 1 },
+    { id: 'palmera', name: 'Palmera Wagon', color: '#6a8f5a', top: 116, accel: 0.19, grip: 0.83, price: 10000, seats: 5, sprite: 1 },
+    { id: 'luna', name: 'Luna Coupe', color: '#c9c2d4', top: 150, accel: 0.27, grip: 0.88, price: 21000, seats: 2, sprite: 2 },
+    { id: 'estrella', name: 'Estrella Sport', color: '#3a5a8c', top: 168, accel: 0.32, grip: 0.91, price: 30000, seats: 2, sprite: 2 },
+    { id: 'norte', name: 'Norte Sedan', color: '#8c8a92', top: 130, accel: 0.22, grip: 0.86, price: 11500, seats: 4, sprite: 1 },
+    { id: 'sierra', name: 'Sierra Truck', color: '#6b4a26', top: 122, accel: 0.20, grip: 0.79, price: 15000, seats: 2, sprite: 1 },
+    { id: 'olas', name: 'Olas Buggy', color: '#e8d27a', top: 142, accel: 0.26, grip: 0.80, price: 16000, seats: 2, sprite: 1 }
   ];
 
   var WEAPONS = [
@@ -147,9 +150,28 @@
 
   var CITY = { width: 4200, height: 3200, oceanX: 180, beachX: 300 };
 
+  // Frame geometry for the low oblique camera: the sky band is the
+  // top SKY_H px (horizon line at HORIZON_Y), the ground plane is
+  // squashed by V_SQUASH, and the canvas is W x H. The renderer and
+  // the HUD both read this table.
+  var FRAME = { W: 1280, H: 720, HORIZON_Y: 180, SKY_H: 180, V_SQUASH: 0.5 };
+
+  // Time-of-day palettes. Each mode is a full grade, not a dimmer:
+  // sky gradient, sun or moon, shadow length, how many windows are
+  // lit, and the ambient floor that keeps night legible (never
+  // near-black). Morning bright, noon warm-yellow, golden hour long
+  // warm shadows, dusk orange-pink, night dark-blue with stars + moon.
+  var DAYLIGHT = {
+    dawn:   { sky: ['#f7c9d4', '#f9e3b8', '#bcd8e8'], tint: 'rgba(244,178,166,0.10)', shadowLen: 1.4, shadowCol: 'rgba(90,60,110,0.28)', windowLit: 0.25, haze: 0.10, ambient: 0.82, sun: { x: 0.24, y: 0.62, r: 26, col: '#ffd9a0' }, moon: null, stars: false, glitter: false },
+    noon:   { sky: ['#7ec3e8', '#a8d8f0', '#d9eefb'], tint: 'rgba(255,255,255,0.00)', shadowLen: 0.5, shadowCol: 'rgba(40,60,90,0.22)', windowLit: 0.05, haze: 0.04, ambient: 1.0, sun: { x: 0.68, y: 0.30, r: 30, col: '#fff3c4' }, moon: null, stars: false, glitter: true },
+    golden: { sky: ['#ff9e4f', '#ffc46b', '#7fb3c8'], tint: 'rgba(255,150,60,0.14)', shadowLen: 2.2, shadowCol: 'rgba(120,50,20,0.34)', windowLit: 0.45, haze: 0.12, ambient: 0.88, sun: { x: 0.72, y: 0.55, r: 34, col: '#ffdf8a' }, moon: null, stars: false, glitter: true },
+    dusk:   { sky: ['#e86a6a', '#f09a6a', '#3d4a7a'], tint: 'rgba(180,90,140,0.12)', shadowLen: 1.8, shadowCol: 'rgba(60,30,70,0.36)', windowLit: 0.7, haze: 0.14, ambient: 0.72, sun: { x: 0.30, y: 0.72, r: 30, col: '#ff9a5e' }, moon: null, stars: true, glitter: false },
+    night:  { sky: ['#0d1530', '#1c2a52', '#2c3a6e'], tint: 'rgba(20,30,80,0.18)', shadowLen: 0.8, shadowCol: 'rgba(0,0,10,0.45)', windowLit: 1.0, haze: 0.08, ambient: 0.62, sun: null, moon: { x: 0.78, y: 0.34, r: 20, col: '#f4ead0' }, stars: true, glitter: true }
+  };
+
   window.PalmaConfig = {
     DISTRICTS: DISTRICTS, RADIO: RADIO, PRICES: PRICES, CARS: CARS,
     WEAPONS: WEAPONS, RANKS: RANKS, CALLSIGNS: CALLSIGNS,
-    CLOCK: CLOCK, CITY: CITY
+    CLOCK: CLOCK, CITY: CITY, FRAME: FRAME, DAYLIGHT: DAYLIGHT
   };
 })();

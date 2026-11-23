@@ -22,10 +22,18 @@ function check(name, ok, detail) {
 }
 
 // ---- stub browser: a canvas and 2d context that absorb all drawing ----
+// measureText returns a zero-width TextMetrics stub: the HUD's
+// fitText compares its width numerically, and the generic proxy
+// would throw "Cannot convert object to primitive value" on that
+// comparison (hud.js fitText is correct on a real canvas).
 function makeCtx() {
   const fn = function () { return proxy; };
   const proxy = new Proxy(fn, {
-    get(t, prop) { return prop === 'canvas' ? canvas : proxy; },
+    get(t, prop) {
+      if (prop === 'canvas') return canvas;
+      if (prop === 'measureText') return () => ({ width: 0 });
+      return proxy;
+    },
     set() { return true; },
     apply() { return proxy; }
   });
@@ -59,6 +67,8 @@ const sandbox = {
   requestAnimationFrame: (cb) => { frameCb = cb; return 1; },
   setTimeout: () => 0,
   clearTimeout: () => {},
+  setInterval: () => 0,
+  clearInterval: () => {},
   console
 };
 sandbox.window = sandbox;
@@ -97,24 +107,70 @@ try {
   check('game starts and runs 10 frames', state.screen === 'playing' && frames(10));
 
   // Minimap: a mission target draws a dashed route, no throw.
+  // B4's D6 grid made drawMinimap take the layout as a parameter;
+  // the test builds it from the exported layoutGrid.
   state.missionTarget = { x: 900, y: 600 };
   try {
-    W.PalmaHud.drawMinimap(ctx, state, city, canvas);
+    W.PalmaHud.drawMinimap(ctx, state, city, canvas, W.PalmaHud.layoutGrid(canvas));
     check('minimap draws with a route target', !!state.missionTarget);
   } catch (e) { check('minimap draws with a route target', false, e.message); }
   const chase = W.PalmaShots.stageShot('chase', 1);
   check('staged chase shot carries a route target', !!chase.state.missionTarget);
 
-  // Dispatch: exactly 5 rows at 4 stars, AIR-1 last.
+  // Dispatch: exactly 8 rows at 4 stars (7 ground + AIR-1), AIR-1 last.
   W.PalmaPolice.stageChase(state, city, 4);
   const rows = W.PalmaPolice.dispatchRows(state);
-  check('dispatch rows = 5 at 4 stars', rows.length === 5, 'got ' + rows.length);
+  check('dispatch rows = 8 at 4 stars', rows.length === 8, 'got ' + rows.length);
   check('dispatch rows carry tactic and distance',
     rows.every((r) => typeof r.tactic === 'string' && typeof r.distM === 'number'));
-  check('dispatch last row is AIR-1', rows[4] && rows[4].callsign === 'AIR-1');
+  check('dispatch last row is AIR-1', rows[rows.length - 1] && rows[rows.length - 1].callsign === 'AIR-1');
   W.PalmaPolice.stageChase(state, city, 2);
-  check('dispatch rows = 2 at 2 stars (no heli)',
-    W.PalmaPolice.dispatchRows(state).length === 2);
+  check('dispatch rows = 4 at 2 stars (no heli)',
+    W.PalmaPolice.dispatchRows(state).length === 4);
+
+  // Audio: distance helpers are pure, so they assert on fake states.
+  const au = W.PalmaAudio;
+  const fakePol = {
+    player: { x: 0, y: 0 },
+    police: {
+      units: [
+        { car: { x: 300, y: 400 } },
+        { car: { x: 30, y: 40 } },
+        { ped: { x: 1000, y: 0 } }
+      ],
+      heli: { x: 0, y: 800 }
+    }
+  };
+  check('nearest police distance is the closest unit (50)',
+    au.nearestPoliceDist(fakePol) === 50, 'got ' + au.nearestPoliceDist(fakePol));
+  check('nearest police distance is Infinity with no police',
+    au.nearestPoliceDist({ player: { x: 0, y: 0 }, police: null }) === Infinity);
+  const fakeTraf = {
+    player: { x: 0, y: 0 },
+    cars: [
+      { x: 500, y: 0, speed: 20 },
+      { x: 60, y: 80, speed: 40, police: true },
+      { x: 90, y: 0, speed: 30 }
+    ]
+  };
+  const near = au.nearestTrafficCar(fakeTraf);
+  check('nearest traffic car skips police and finds the 90-unit car',
+    !!near && near.dist === 90 && near.car.speed === 30,
+    near ? ('dist ' + near.dist) : 'null');
+  check('nearest traffic car is null on an empty street',
+    au.nearestTrafficCar({ player: { x: 0, y: 0 }, cars: [] }) === null);
+  try {
+    au.honk();
+    check('honk is safe with no audio context', true);
+  } catch (e) { check('honk is safe with no audio context', false, e.message); }
+  try {
+    const honkState = {
+      player: { x: 0, y: 0, vehicle: null }, wanted: 0, radioStation: 0,
+      cars: [{ x: 10, y: 0, honk: true, speed: 0 }]
+    };
+    au.tick(honkState, 0.016);
+    check('tick consumes a honk flag without audio', honkState.cars[0].honk === false);
+  } catch (e) { check('tick consumes a honk flag without audio', false, e.message); }
 
   // Save slots: write three, read them back, clear one.
   const s1 = W.PalmaProgress.saveGame(state, 0, memStore);

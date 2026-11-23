@@ -175,11 +175,38 @@ function policeRevealed(state, nowMs) {
   return !!state.crew.kip.revealing && state.crew.kip.activeUntil > now;
 }
 
+// Cooldown display data for the HUD rail and the screens crew cards:
+// one row per specialist with the key, the seconds left, the fraction
+// of the cooldown still to run (1 = just used, 0 = ready), and a
+// ready-made label string. Pure data, no canvas.
+const CREW_KEYS = { tuck: 'Z', ines: 'X', kip: 'V' };
+
+function cooldownDisplay(state, nowMs) {
+  const rows = crewStatus(state, nowMs);
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    role: r.role,
+    ability: r.ability,
+    effect: r.effect,
+    key: CREW_KEYS[r.id] || '',
+    cooldownLeft: r.cooldownLeft,
+    cooldownTotal: r.cooldownSeconds,
+    fraction: r.cooldownSeconds > 0 ? Math.max(0, Math.min(1, r.cooldownLeft / r.cooldownSeconds)) : 0,
+    ready: r.ready,
+    activeLeft: r.activeLeft,
+    revealing: r.revealing,
+    label: r.ready
+      ? (r.activeLeft > 0 ? `ACTIVE ${r.activeLeft}s` : `READY [${CREW_KEYS[r.id] || ''}]`)
+      : `COOLDOWN ${r.cooldownLeft}s`,
+  }));
+}
+
 // Classic-script export: the browser loads this file with a plain
 // <script> tag, so the public API is published on window.
 window.PalmaCrew = {
   CREW: CREW, crewById: crewById, freshCrew: freshCrew,
   ensureCrew: ensureCrew, tickCrew: tickCrew, crewReady: crewReady,
   crewStatus: crewStatus, useAbility: useAbility,
-  policeRevealed: policeRevealed,
+  policeRevealed: policeRevealed, cooldownDisplay: cooldownDisplay,
 };

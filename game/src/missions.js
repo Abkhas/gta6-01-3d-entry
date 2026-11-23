@@ -614,6 +614,21 @@ function stageProgress(state) {
   return { done, total: mission.stages.length, label: `${done + 1}/${mission.stages.length}` };
 }
 
+// The NEXT objective line the HUD prints under the current objective:
+// the next stage's objective in the same mission; on the last stage,
+// the mission's payoff line; with no mission running, the next
+// unlocked mission's name. Always a plain string, never empty.
+function nextObjective(state) {
+  const mission = currentMission(state);
+  if (!mission) {
+    const next = MISSIONS.find((m) => !state.missions?.completed?.includes(m.id) && isMissionUnlocked(state, m.id));
+    return next ? `Next job: ${next.name} — ${next.giver}` : 'All missions complete — free roam';
+  }
+  const idx = state.missions.stage;
+  if (idx + 1 < mission.stages.length) return mission.stages[idx + 1].objective;
+  return `Finish ${mission.name} — collect $${mission.payout.toLocaleString('en-US')} + ${mission.rp} RP`;
+}
+
 function emit(hooks, state, kind, payload) {
   if (hooks && typeof hooks.onEvent === 'function') {
     hooks.onEvent(state, kind, payload || {});
@@ -771,6 +786,7 @@ function missionSummary(state) {
     current: state.missions.current,
     currentName: currentMission(state)?.name || null,
     stageLabel: stageProgress(state).label,
+    next: nextObjective(state),
     nextUnlocked: MISSIONS.find((m) => !state.missions.completed.includes(m.id) && isMissionUnlocked(state, m.id))?.name || null,
   };
 }
@@ -788,7 +804,7 @@ window.PalmaMissions = {
   missionById: missionById, missionList: missionList,
   ensureMissionState: ensureMissionState, isMissionUnlocked: isMissionUnlocked,
   currentMission: currentMission, currentStage: currentStage,
-  stageProgress: stageProgress, startMission: startMission,
+  stageProgress: stageProgress, nextObjective: nextObjective, startMission: startMission,
   completeMission: completeMission, reportArrival: reportArrival,
   reportCombat: reportCombat, reportRace: reportRace,
   reportDelivery: reportDelivery, failMission: failMission,

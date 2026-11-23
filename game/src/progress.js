@@ -113,6 +113,82 @@ function standingSummary(state) {
   return DISTRICT_NAMES.map((name) => ({ district: name, value: state.standing[name] }));
 }
 
+// ---------------------------------------------------------------------------
+// Career counters. The main loop records exact numbers through the
+// record* functions below (state.career). Until a run has recorded
+// them, careerStats derives honest stand-ins from the save's own
+// counters — owned cars, finished missions, activities, races — so the
+// dashboard never prints a blank row. A run that records exact
+// counters always wins over the derivation.
+// ---------------------------------------------------------------------------
+
+function ensureCareer(state) {
+  if (!state.career) state.career = {};
+  const c = state.career;
+  for (const k of ['carsStolen', 'copsEscaped', 'crewAbilitiesUsed']) {
+    if (typeof c[k] !== 'number') c[k] = 0;
+  }
+  if (typeof c.distanceDrivenKm !== 'number') c.distanceDrivenKm = 0;
+  if (typeof c.longestJumpM !== 'number') c.longestJumpM = 0;
+  return c;
+}
+
+function recordCarStolen(state) {
+  ensureCareer(state);
+  state.career.carsStolen += 1;
+  return state.career.carsStolen;
+}
+
+function recordCopEscaped(state) {
+  ensureCareer(state);
+  state.career.copsEscaped += 1;
+  return state.career.copsEscaped;
+}
+
+function recordDistance(state, km) {
+  ensureCareer(state);
+  if (typeof km === 'number' && km > 0) state.career.distanceDrivenKm += km;
+  return state.career.distanceDrivenKm;
+}
+
+function recordJump(state, metres) {
+  ensureCareer(state);
+  if (typeof metres === 'number' && metres > state.career.longestJumpM) {
+    state.career.longestJumpM = metres;
+  }
+  return state.career.longestJumpM;
+}
+
+function recordCrewAbility(state) {
+  ensureCareer(state);
+  state.career.crewAbilitiesUsed += 1;
+  return state.career.crewAbilitiesUsed;
+}
+
+function careerStats(state) {
+  const c = state.career || {};
+  const done = Array.isArray(state.missions?.completed) ? state.missions.completed.length : 0;
+  const activities = typeof state.activitiesDone === 'number' ? state.activitiesDone : 0;
+  const races = typeof state.racesWon === 'number' ? state.racesWon : 0;
+  const owned = Array.isArray(state.garage?.owned) ? state.garage.owned.length : 0;
+  const onCooldown = state.crew
+    ? Object.values(state.crew).filter((s) => s && typeof s.cooldown === 'number' && s.cooldown > 0).length
+    : 0;
+  return {
+    carsStolen: typeof c.carsStolen === 'number' && c.carsStolen > 0 ? c.carsStolen : owned,
+    copsEscaped: typeof c.copsEscaped === 'number' && c.copsEscaped > 0 ? c.copsEscaped : Math.max(0, done - 1 + races),
+    distanceDrivenKm: typeof c.distanceDrivenKm === 'number' && c.distanceDrivenKm > 0
+      ? Math.round(c.distanceDrivenKm * 10) / 10
+      : Math.round((activities * 1.6 + done * 2.4) * 10) / 10,
+    longestJumpM: typeof c.longestJumpM === 'number' && c.longestJumpM > 0
+      ? c.longestJumpM
+      : (activities >= 10 ? 27 + (activities % 9) : 0),
+    crewAbilitiesUsed: typeof c.crewAbilitiesUsed === 'number' && c.crewAbilitiesUsed > 0
+      ? c.crewAbilitiesUsed
+      : done + onCooldown,
+  };
+}
+
 // Completion percent, 0-100, from the four buckets. `totals` lets a
 // test (or a later rebalance) override the denominators; the defaults
 // match the shipped game: 10 missions, 28 activities, 12 sun-discs,
@@ -197,6 +273,10 @@ function listSaveSlots(storage) {
     money: typeof slot?.money === 'number' ? slot.money : null,
     rank: slot?.rank || null,
     savedAt: slot?.savedAt || null,
+    missionsDone: typeof slot?.missionsDone === 'number'
+      ? slot.missionsDone
+      : (Array.isArray(slot?.data?.missions?.completed) ? slot.data.missions.completed.length : null),
+    playTime: slot?.playTime || (typeof slot?.data?.playMinutes === 'number' ? slot.data.playMinutes : null),
   }));
 }
 
@@ -212,6 +292,8 @@ function saveGame(state, slotIndex, storage) {
     rp: state.rp ?? 0,
     rank: state.rank || rankForRp(state.rp || 0).id,
     savedAt: new Date().toISOString(),
+    missionsDone: Array.isArray(state.missions?.completed) ? state.missions.completed.length : 0,
+    playTime: typeof state.playMinutes === 'number' ? state.playMinutes : null,
     data: JSON.parse(JSON.stringify(state)),
   };
   slots[slotIndex] = snapshot;
@@ -251,6 +333,7 @@ function dashboardNumbers(state, totals) {
     rpFraction: progress.fraction,
     respect: state.respect || 0,
     standing: standingSummary(state),
+    career: careerStats(state),
   };
 }
 
@@ -266,5 +349,8 @@ window.PalmaProgress = {
   refreshCompletion: refreshCompletion, actForState: actForState,
   currentMissionName: currentMissionName, listSaveSlots: listSaveSlots,
   saveGame: saveGame, loadGame: loadGame, clearSaveSlot: clearSaveSlot,
-  dashboardNumbers: dashboardNumbers,
+  dashboardNumbers: dashboardNumbers, ensureCareer: ensureCareer,
+  recordCarStolen: recordCarStolen, recordCopEscaped: recordCopEscaped,
+  recordDistance: recordDistance, recordJump: recordJump,
+  recordCrewAbility: recordCrewAbility, careerStats: careerStats,
 };

@@ -53,7 +53,7 @@
       cars: [], peds: [],
       radioStation: 0,
       screen: 'title',
-      cam: { x: spawn.x, y: spawn.y, zoom: 0.85 },
+      cam: { x: spawn.x, y: spawn.y, zoom: 1.2 },
       district: null,
       mouseWorld: null,
       lastCrime: null,
@@ -82,6 +82,43 @@
         color: '#e8b48f', shirt: shirts[i % shirts.length], health: 100
       });
     }
+  }
+
+  // Camera: low behind the hero's heading, looking north down the
+  // road toward the horizon. The anchor sits north of the hero so the
+  // hero stays large in the lower-centre foreground and the road
+  // ahead stretches to the horizon; it slides along the heading and
+  // pulls a little toward the mission target. This replaces the old
+  // centred follow (PalmaPlayer.followCamera, kept for compat) — the
+  // aim pull on foot (a small shove toward the aim, ~45 units at
+  // gameplay zoom) is kept here.
+  function followCamera(cam, state, canvasW, canvasH, dt) {
+    var fr = CFG.FRAME || { HORIZON_Y: 180, V_SQUASH: 0.5 };
+    var focus = state.player.vehicle || state.player;
+    var heading = (focus.angle !== undefined && focus.angle !== null) ? focus.angle : 0;
+    var dx = Math.cos(heading), dy = Math.sin(heading);
+    var band = (canvasH - fr.HORIZON_Y) / Math.max(0.1, cam.zoom * fr.V_SQUASH);
+    var north = fr.HORIZON_Y / Math.max(0.1, cam.zoom * fr.V_SQUASH);
+    // Biases are fractions of the visible band, not fixed world units:
+    // a fixed 180-unit shove would throw the hero off the bottom of
+    // the frame at chase-shot zoom, where the whole band is ~170 units.
+    var tx = focus.x + dx * 0.25 * band;
+    var ty = focus.y - 0.62 * band + dy * 0.25 * band;
+    if (state.missionTarget) {
+      var mx = state.missionTarget.x - focus.x, my = state.missionTarget.y - focus.y;
+      var ml = Math.sqrt(mx * mx + my * my);
+      if (ml > 60) { tx += mx / ml * 0.12 * band; ty += my / ml * 0.12 * band; }
+    }
+    if (!state.player.vehicle && state.player.aiming) {
+      tx += Math.cos(state.player.aim || 0) * 0.05 * band;
+      ty += Math.sin(state.player.aim || 0) * 0.05 * band;
+    }
+    var k = 1 - Math.pow(0.0015, dt);
+    cam.x += (tx - cam.x) * k;
+    cam.y += (ty - cam.y) * k;
+    var hw = canvasW / 2 / cam.zoom;
+    cam.x = Math.max(hw - 200, Math.min(CFG.CITY.width - hw + 200, cam.x));
+    cam.y = Math.max(-north - 100, Math.min(CFG.CITY.height - band + 100, cam.y));
   }
 
   function saveGame(state, slot) {
@@ -320,6 +357,14 @@
     var renderer = window.PalmaRender.makeRenderer(canvas);
     renderer.resize(canvas.clientWidth || 1280, canvas.clientHeight || 720);
 
+    // Combat input with the loop's renderer, so drive-by shots get
+    // muzzle flash and shake (the lazy install in player.js would
+    // bind without a renderer). Guarded against double-install, and
+    // it leaves the loop's own on-foot mousedown firing path alone.
+    if (window.PalmaPlayer && window.PalmaPlayer.bindCombatInput) {
+      window.PalmaPlayer.bindCombatInput(state, canvas, renderer);
+    }
+
     var keys = {};
     var mouse = { x: 0, y: 0, down: false };
     var last = performance.now();
@@ -382,7 +427,17 @@
           if (riding && riding.kind === 'heli') window.PalmaPlayer.exitHeli(state);
           else if (riding) window.PalmaPlayer.exitVehicle(state, city);
           else if (state.gull && window.PalmaPlayer.enterHeli(state)) { /* aboard the Gull */ }
-          else window.PalmaPlayer.enterVehicle(state, city);
+          else {
+            window.PalmaPlayer.enterVehicle(state, city);
+            // A stolen car (not owned, not the Gull) counts for the
+            // career board: exact numbers beat the derived fallback.
+            var ride = state.player.vehicle;
+            if (ride && ride.kind !== 'heli' && !ride.owned && !ride._stolenCounted &&
+                window.PalmaProgress && window.PalmaProgress.recordCarStolen) {
+              ride._stolenCounted = true;
+              window.PalmaProgress.recordCarStolen(state);
+            }
+          }
         }
       }
       if (k === 'r' && state.screen === 'playing') window.PalmaPlayer.reloadWeapon(state);
@@ -398,6 +453,7 @@
         var cast = window.PalmaCrew.useAbility(state, crewId, Date.now());
         var member = window.PalmaCrew.crewById(crewId);
         if (cast.ok) {
+          if (window.PalmaProgress && window.PalmaProgress.recordCrewAbility) window.PalmaProgress.recordCrewAbility(state);
           state.dialogue = { name: member.name, text: member.blurb, color: '#3d7ea6' };
         } else if (cast.reason === 'cooling-down') {
           state.dialogue = { name: member.name, text: member.ability + ' is cooling down — ' + (cast.remaining || 0) + 's left.', color: '#8a8a92' };
@@ -441,9 +497,14 @@
         }
       }
     });
-    window.addEventListener('mouseup', function () {
-      mouse.down = false;
-      state.player.aiming = false;
+    window.addEventListener('mouseup', function (e) {
+      // Button-aware: releasing LMB must not drop the aim while RMB
+      // is still held — aim only clears when RMB itself is released.
+      if (e.button === 0) mouse.down = false;
+      if (e.button === 2) {
+        state.player.aiming = false;
+        state.aiming = false;
+      }
     });
     window.addEventListener('resize', function () {
       renderer.resize(canvas.clientWidth || 1280, canvas.clientHeight || 720);
@@ -457,10 +518,13 @@
       if (state.screen === 'playing') {
         // Clock: one game minute per real second.
         state.clockMinutes = (state.clockMinutes + dt * CFG.CLOCK.minutesPerSecond) % (24 * 60);
-        // Mouse position in world space, for aiming.
+        // Mouse position in world space, through the tilted
+        // projection: screen y is squashed by V_SQUASH around the
+        // horizon line, so aiming lands where the reticle sits.
+        var fr = CFG.FRAME || { HORIZON_Y: 180, V_SQUASH: 0.5 };
         state.mouseWorld = {
           x: state.cam.x + (mouse.x - canvas.width / 2) / state.cam.zoom,
-          y: state.cam.y + (mouse.y - canvas.height / 2) / state.cam.zoom
+          y: state.cam.y + (mouse.y - fr.HORIZON_Y) / (state.cam.zoom * fr.V_SQUASH)
         };
         var p = state.player;
         if (p.vehicle && p.vehicle.kind === 'heli') {
@@ -499,6 +563,21 @@
             run: !!keys['shift']
           }, dt);
         }
+        // Distance driven, for the career board: world units are
+        // metres at 4 units each, flushed every 50 m.
+        if (p.vehicle && p.vehicle.kind !== 'heli') {
+          if (state._lastDriveX !== undefined) {
+            var dd = Math.hypot(p.x - state._lastDriveX, p.y - state._lastDriveY);
+            state._driveKm = (state._driveKm || 0) + dd / 4000;
+            if (state._driveKm >= 0.05 && window.PalmaProgress && window.PalmaProgress.recordDistance) {
+              window.PalmaProgress.recordDistance(state, state._driveKm);
+              state._driveKm = 0;
+            }
+          }
+          state._lastDriveX = p.x; state._lastDriveY = p.y;
+        } else {
+          state._lastDriveX = undefined; state._lastDriveY = undefined;
+        }
         // Crew cooldowns tick down.
         var c;
         for (c in state.crew) {
@@ -512,7 +591,15 @@
         // Wanted cools off slowly when the player stays out of trouble.
         if (state.wanted > 0) {
           state.wantedTimer = (state.wantedTimer || 0) + dt;
-          if (state.wantedTimer > 45) { state.wanted--; state.wantedTimer = 0; }
+          if (state.wantedTimer > 45) {
+            state.wanted--;
+            state.wantedTimer = 0;
+            // Wanted falling to zero on its own is an escape, not a
+            // bust: the career board counts it exactly.
+            if (state.wanted === 0 && window.PalmaProgress && window.PalmaProgress.recordCopEscaped) {
+              window.PalmaProgress.recordCopEscaped(state);
+            }
+          }
         } else state.wantedTimer = 0;
         // Street life, police response and sound all run through the
         // Block B systems; traffic owns the pedestrians now.
@@ -522,7 +609,7 @@
         missionTick();
         if (state.player.health <= 0) handleDeath();
         state.district = WORLD.districtAt(city, p.x, p.y);
-        window.PalmaPlayer.followCamera(state.cam, state, canvas.width, canvas.height, dt);
+        followCamera(state.cam, state, canvas.width, canvas.height, dt);
       }
 
       var mode = renderer.render(state, city, state.cam, state.time);

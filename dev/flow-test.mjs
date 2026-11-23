@@ -22,10 +22,18 @@ function check(name, ok, detail) {
 }
 
 // ---- stub browser: a canvas and 2d context that absorb all drawing ----
+// measureText returns a zero-width TextMetrics stub: the HUD's
+// fitText compares its width numerically, and the generic proxy
+// would throw "Cannot convert object to primitive value" on that
+// comparison (hud.js fitText is correct on a real canvas).
 function makeCtx() {
   const fn = function () { return proxy; };
   const proxy = new Proxy(fn, {
-    get(t, prop) { return prop === 'canvas' ? canvas : proxy; },
+    get(t, prop) {
+      if (prop === 'canvas') return canvas;
+      if (prop === 'measureText') return () => ({ width: 0 });
+      return proxy;
+    },
     set() { return true; },
     apply() { return proxy; }
   });
@@ -58,6 +66,8 @@ const sandbox = {
   requestAnimationFrame: (cb) => { frameCb = cb; return 1; },
   setTimeout: () => 0,
   clearTimeout: () => {},
+  setInterval: () => 0,
+  clearInterval: () => {},
   console
 };
 sandbox.window = sandbox;
@@ -157,9 +167,10 @@ try {
   check('Z again while cooling down changes nothing', state.wanted === 1);
 
   // Wanted 4: dispatch board full, AIR-1 overhead, loop keeps running.
+  // B3's composition: 7 ground units (foot, 4 cruisers, 2 bikes) + AIR-1.
   W.PalmaPolice.stageChase(state, city, 4);
   const rows = W.PalmaPolice.dispatchRows(state);
-  check('dispatch rows = 5 at 4 stars', rows.length === 5, 'got ' + rows.length);
+  check('dispatch rows = 8 at 4 stars', rows.length === 8, 'got ' + rows.length);
   check('AIR-1 spotlight row present',
     rows.some((r) => r.callsign === 'AIR-1' && r.tactic === 'SPOTLIGHT'));
   // AIR-1 wears a drawn body now, not just a cone: the overlay calls
@@ -172,8 +183,8 @@ try {
   W.PalmaPolice.drawOverlay(state, city, canvas, renderer, 'golden');
   check('AIR-1 body drawn via drawHeli', heliDraws === 1, 'draws ' + heliDraws);
   check('30 frames at 4 stars without a throw', frames(30));
-  check('dispatch still 5 rows after the loop',
-    W.PalmaPolice.dispatchRows(state).length === 5);
+  check('dispatch still 8 rows after the loop',
+    W.PalmaPolice.dispatchRows(state).length === 8);
 
   // The Gull: board, climb to about 15 m, fly, land, step out.
   const gull = state.gull;

@@ -319,6 +319,29 @@ function raceSummary(state) {
   }));
 }
 
+// The garage strip the screens layer draws: owned cars, the current
+// car's upgrades, and the counts the dashboard prints. Pure data, no
+// canvas — screens.js turns it into chips and lines.
+function garageStrip(state) {
+  ensureGarage(state);
+  const model = state.player?.vehicle?.model || 'Cometa GT';
+  const owned = carUpgrades(state, model);
+  const totalUpgrades = (owned.engine || 0) + (owned.armor || 0) + (owned.paint && owned.paint !== 'Factory' ? 1 : 0);
+  return {
+    owned: [...state.garage.owned],
+    current: model,
+    upgrades: { engine: owned.engine || 0, armor: owned.armor || 0, paint: owned.paint || 'Factory' },
+    totalUpgrades,
+    carsOwned: state.garage.owned.length,
+    carsTotal: GARAGE_CARS.length,
+    propertiesOwned: (state.properties?.owned || []).length,
+    discsFound: (state.collectibles?.found || []).length,
+    discsTotal: SUN_DISCS.length,
+    racesWon: typeof state.racesWon === 'number' ? state.racesWon : 0,
+    racesTotal: STREET_RACES.length,
+  };
+}
+
 // Classic-script export: the browser loads this file with a plain
 // <script> tag, so the public API is published on window.
 window.PalmaGarage = {
@@ -331,4 +354,5 @@ window.PalmaGarage = {
   propertySummary: propertySummary, collectSunDisc: collectSunDisc,
   sunDiscSummary: sunDiscSummary, enterRace: enterRace,
   finishRace: finishRace, raceSummary: raceSummary,
+  garageStrip: garageStrip,
 };
