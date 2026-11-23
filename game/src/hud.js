@@ -262,7 +262,9 @@
     }
   }
 
-  // Bottom right, above the minimap: speed, car name, condition.
+  // Bottom right, above the minimap: speed, vehicle name, condition.
+  // A heli has no car model, so the name line and the detail line
+  // switch on kind: the Gull shows her name and her altitude.
   function drawSpeedo(ctx, state, canvas) {
     var p = state.player;
     if (!p.vehicle) return;
@@ -278,11 +280,16 @@
     ctx.fillText(speed + ' km/h', x + 10, y + 6);
     ctx.fillStyle = '#ffd166';
     ctx.font = 'bold 13px system-ui, sans-serif';
-    ctx.fillText(p.vehicle.model.name.toUpperCase(), x + 10, y + 36);
+    var flying = p.vehicle.kind === 'heli';
+    var shown = flying ? 'THE GULL' : p.vehicle.model.name.toUpperCase();
+    ctx.fillText(shown, x + 10, y + 36);
     ctx.fillStyle = '#e8e8e8';
     ctx.font = '12px system-ui, sans-serif';
     var cond = window.PalmaVehicles ? window.PalmaVehicles.condition(p.vehicle) : 100;
-    ctx.fillText('CONDITION ' + cond + '%', x + 130, y + 36);
+    var detail = flying
+      ? 'ALT ' + (window.PalmaVehicles ? window.PalmaVehicles.gullAltitude(p.vehicle) : 0) + ' m  ·  CONDITION ' + cond + '%'
+      : 'CONDITION ' + cond + '%';
+    ctx.fillText(detail, x + 130, y + 36);
   }
 
   // Bottom left: clock, district, and the radio line.

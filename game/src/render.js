@@ -316,6 +316,59 @@
       }
     }
 
+    // The Gull, drawn as a heli: a gold body lifted off the ground
+    // by her altitude, a spinning rotor, and a shadow that stays on
+    // the deck below and fades as she climbs.
+    function drawHeli(cam, heli, mode) {
+      var g = project(cam, heli.x, heli.y);
+      var z = cam.zoom;
+      var alt = heli.altitude || 0;
+      var lift = alt * 2.4 * z;
+      var fade = Math.max(0.12, 1 - alt / 60);
+      ctx.fillStyle = 'rgba(0,0,0,' + (0.30 * fade).toFixed(2) + ')';
+      ctx.beginPath();
+      ctx.ellipse(g.x + alt * 1.2, g.y + alt * 1.6, 46 * z * (1 - alt / 240), 16 * z, 0, 0, Math.PI * 2);
+      ctx.fill();
+      var bx = g.x, by = g.y - lift;
+      ctx.save();
+      ctx.translate(bx, by);
+      ctx.rotate(heli.angle);
+      ctx.fillStyle = heli.color || '#ffd166';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 30 * z, 13 * z, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#23262f';
+      ctx.fillRect(22 * z, -3 * z, 34 * z, 6 * z);
+      ctx.fillRect(52 * z, -9 * z, 5 * z, 18 * z);
+      ctx.fillStyle = '#c8d4e0';
+      ctx.beginPath();
+      ctx.ellipse(-12 * z, -2 * z, 10 * z, 6 * z, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#23262f';
+      ctx.lineWidth = 2 * z;
+      ctx.beginPath();
+      ctx.moveTo(-16 * z, 11 * z);
+      ctx.lineTo(-16 * z, 18 * z);
+      ctx.moveTo(16 * z, 11 * z);
+      ctx.lineTo(16 * z, 18 * z);
+      ctx.stroke();
+      ctx.restore();
+      // Rotor: one bar through the mast, turning with heli.rotor.
+      var ra = heli.rotor || 0;
+      ctx.strokeStyle = 'rgba(200,212,224,0.9)';
+      ctx.lineWidth = 3 * z;
+      ctx.beginPath();
+      ctx.moveTo(bx - Math.cos(ra) * 44 * z, by - Math.sin(ra) * 44 * z - 10 * z);
+      ctx.lineTo(bx + Math.cos(ra) * 44 * z, by + Math.sin(ra) * 44 * z - 10 * z);
+      ctx.stroke();
+      if (mode === 'night' || mode === 'dusk') {
+        ctx.fillStyle = 'rgba(255,240,180,0.95)';
+        ctx.beginPath();
+        ctx.arc(bx, by - 12 * z, 3 * z, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
     function drawPerson(cam, person, mode) {
       var p = project(cam, person.x, person.y);
       var z = cam.zoom;
@@ -368,10 +421,16 @@
       for (i = 0; i < city.palms.length; i++) {
         if (inView(cam, city.palms[i].x, city.palms[i].y, 60)) drawPalm(cam, city.palms[i], mode);
       }
-      // Parked + traffic + police cars, then the player's car, then people.
+      // Parked + traffic + police cars, then the Gull on her pad,
+      // then the player's ride — a heli is drawn as a heli, never
+      // as a car, whether she is parked or being flown.
       var cars = state.cars || [];
       for (i = 0; i < cars.length; i++) drawCar(cam, cars[i], mode);
-      if (state.player.vehicle) drawCar(cam, state.player.vehicle, mode);
+      if (state.gull && state.gull !== state.player.vehicle) drawHeli(cam, state.gull, mode);
+      if (state.player.vehicle) {
+        if (state.player.vehicle.kind === 'heli') drawHeli(cam, state.player.vehicle, mode);
+        else drawCar(cam, state.player.vehicle, mode);
+      }
       var peds = state.peds || [];
       for (i = 0; i < peds.length; i++) drawPerson(cam, peds[i], mode);
       if (!state.player.vehicle) drawPerson(cam, state.player, mode);

@@ -42,17 +42,23 @@
   }
 
   function pickModel(rng) {
-    // Weight the roster toward cheap street cars; the Cometa GT almost
-    // never parks itself — it has to be found or stolen on purpose.
+    // One roll down a weighted ladder over the whole roster. Cheap
+    // street cars fill most of the bays; the quick and the rare ones
+    // show up just often enough to spot. The Cometa GT is never
+    // parked by chance — it has to be found or stolen on purpose.
+    var ladder = [
+      ['vela', 0.20], ['brisa', 0.36], ['monzon', 0.48],
+      ['corriente', 0.58], ['faro', 0.66], ['tiburon', 0.72],
+      ['halcon', 0.77], ['playa', 0.81], ['duna', 0.84],
+      ['arena', 0.87], ['costa', 0.895], ['palmera', 0.92],
+      ['luna', 0.94], ['estrella', 0.955], ['norte', 0.97],
+      ['sierra', 0.985], ['olas', 1.01]
+    ];
     var roll = rng();
-    if (roll < 0.25) return 'vela';
-    if (roll < 0.45) return 'brisa';
-    if (roll < 0.58) return 'monzon';
-    if (roll < 0.70) return 'corriente';
-    if (roll < 0.80) return 'faro';
-    if (roll < 0.88) return 'tiburon';
-    if (roll < 0.95) return 'halcon';
-    return 'playa';
+    for (var i = 0; i < ladder.length; i++) {
+      if (roll < ladder[i][1]) return ladder[i][0];
+    }
+    return 'olas';
   }
 
   // input: { throttle: -1..1, steer: -1..1, brake: bool, handbrake: bool }

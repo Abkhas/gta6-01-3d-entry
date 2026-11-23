@@ -126,6 +126,10 @@
     var city = WORLD.buildCity(20261123);
     var state = freshState(city);
     seedStreetLife(state, city);
+    // The heli builder hands the loop the city and the parked Gull;
+    // the flight step and the boarding key both read them from here.
+    state.city = city;
+    state.gull = window.PalmaVehicles.spawnGull(city);
     var renderer = window.PalmaRender.makeRenderer(canvas);
     renderer.resize(canvas.clientWidth || 1280, canvas.clientHeight || 720);
 
@@ -162,7 +166,13 @@
         }
       }
       if (k === 'e' && state.screen === 'playing') {
-        if (state.player.vehicle) window.PalmaPlayer.exitVehicle(state, city);
+        // One key, four cases, picked by what Rey is in or near: a
+        // heli in the air lands first in the exit check, then a car,
+        // then boarding — the Gull when she is close, else a car.
+        var riding = state.player.vehicle;
+        if (riding && riding.kind === 'heli') window.PalmaPlayer.exitHeli(state);
+        else if (riding) window.PalmaPlayer.exitVehicle(state, city);
+        else if (state.gull && window.PalmaPlayer.enterHeli(state)) { /* aboard the Gull */ }
         else window.PalmaPlayer.enterVehicle(state, city);
       }
       if (k === 'r' && state.screen === 'playing') window.PalmaPlayer.reloadWeapon(state);
@@ -214,7 +224,22 @@
           y: state.cam.y + (mouse.y - canvas.height / 2) / state.cam.zoom
         };
         var p = state.player;
-        if (p.vehicle) {
+        if (p.vehicle && p.vehicle.kind === 'heli') {
+          // Flying the Gull: W/S for speed, A/D to turn, Space to
+          // climb, C to sink, Shift to brake. The flight step reads
+          // its input from state.heliInput each frame.
+          state.heliInput = {
+            throttle: (keys['w'] || keys['arrowup'] ? 1 : 0) + (keys['s'] || keys['arrowdown'] ? -1 : 0),
+            steer: (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0),
+            climb: (keys['space'] ? 1 : 0) - (keys['c'] ? 1 : 0),
+            brake: !!keys['shift']
+          };
+          var hev = window.PalmaVehicles.updateHeli(state, dt);
+          if (hev.crashed) renderer.addShake(6);
+          else if (hev.scraped) renderer.addShake(2);
+          p.x = p.vehicle.x; p.y = p.vehicle.y;
+          p.angle = p.vehicle.angle;
+        } else if (p.vehicle) {
           var input = {
             throttle: (keys['w'] || keys['arrowup'] ? 1 : 0) + (keys['s'] || keys['arrowdown'] ? -1 : 0),
             steer: (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0),
@@ -312,16 +337,24 @@
       ctx.fillStyle = '#ffd166';
       var station = CFG.RADIO[state.radioStation];
       ctx.fillText(station.name + ' — ' + station.tracks[0], 22, canvas.height - 34);
-      // Car readout while driving, bottom right.
+      // Vehicle readout while driving or flying, bottom right. A
+      // heli carries no car model, so the label and the second line
+      // switch on kind instead of reading vehicle.model.
       if (p.vehicle) {
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.fillRect(canvas.width - 234, canvas.height - 64, 220, 50);
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 16px system-ui, sans-serif';
-        ctx.fillText(p.vehicle.model.name, canvas.width - 226, canvas.height - 58);
+        var flying = p.vehicle.kind === 'heli';
+        var rideName = flying ? 'The Gull' : p.vehicle.model.name;
+        ctx.fillText(rideName, canvas.width - 226, canvas.height - 58);
         ctx.font = '13px system-ui, sans-serif';
         ctx.fillStyle = '#ffd166';
-        ctx.fillText(Math.round(Math.abs(p.vehicle.speed) * 2.2) + ' km/h  ·  ' + window.PalmaVehicles.condition(p.vehicle) + '%', canvas.width - 226, canvas.height - 34);
+        var cond = window.PalmaVehicles.condition(p.vehicle);
+        var rideLine = flying
+          ? 'ALT ' + window.PalmaVehicles.gullAltitude(p.vehicle) + ' m  ·  ' + cond + '%'
+          : Math.round(Math.abs(p.vehicle.speed) * 2.2) + ' km/h  ·  ' + cond + '%';
+        ctx.fillText(rideLine, canvas.width - 226, canvas.height - 34);
       }
       // Small minimap: real street geometry, district dots, player arrow.
       var ms = 150, mx = canvas.width - ms - 14, my = 84;

@@ -102,23 +102,38 @@
     { id: 'monzon', name: 'Monzon Taxi', color: '#f2a007', top: 128, accel: 0.22, grip: 0.85, price: 11000, seats: 4 },
     { id: 'playa', name: 'Playa Convertible', color: '#e86a92', top: 148, accel: 0.28, grip: 0.87, price: 22000, seats: 2 },
     { id: 'corriente', name: 'Corriente SUV', color: '#4a6b4f', top: 136, accel: 0.21, grip: 0.84, price: 20000, seats: 5 },
-    { id: 'duna', name: 'Duna Muscle', color: '#8c2f2f', top: 164, accel: 0.31, grip: 0.82, price: 26000, seats: 2 }
+    { id: 'duna', name: 'Duna Muscle', color: '#8c2f2f', top: 164, accel: 0.31, grip: 0.82, price: 26000, seats: 2 },
+    { id: 'arena', name: 'Arena Roadster', color: '#e07840', top: 152, accel: 0.29, grip: 0.89, price: 19000, seats: 2 },
+    { id: 'costa', name: 'Costa Cruiser', color: '#2e6f7e', top: 126, accel: 0.21, grip: 0.85, price: 13000, seats: 4 },
+    { id: 'palmera', name: 'Palmera Wagon', color: '#6a8f5a', top: 116, accel: 0.19, grip: 0.83, price: 10000, seats: 5 },
+    { id: 'luna', name: 'Luna Coupe', color: '#c9c2d4', top: 150, accel: 0.27, grip: 0.88, price: 21000, seats: 2 },
+    { id: 'estrella', name: 'Estrella Sport', color: '#3a5a8c', top: 168, accel: 0.32, grip: 0.91, price: 30000, seats: 2 },
+    { id: 'norte', name: 'Norte Sedan', color: '#8c8a92', top: 130, accel: 0.22, grip: 0.86, price: 11500, seats: 4 },
+    { id: 'sierra', name: 'Sierra Truck', color: '#6b4a26', top: 122, accel: 0.20, grip: 0.79, price: 15000, seats: 2 },
+    { id: 'olas', name: 'Olas Buggy', color: '#e8d27a', top: 142, accel: 0.26, grip: 0.80, price: 16000, seats: 2 }
   ];
 
   var WEAPONS = [
     { id: 'fists', name: 'Fists', damage: 12, mag: 0, reserve: 0, price: 0 },
     { id: 'pistol', name: 'P9 Pistol', damage: 26, mag: 12, reserve: 60, price: 500 },
     { id: 'smg', name: 'Vespa SMG', damage: 16, mag: 30, reserve: 120, price: 1800 },
-    { id: 'shotgun', name: 'Duna 12', damage: 55, mag: 6, reserve: 24, price: 2400 }
+    { id: 'shotgun', name: 'Duna 12', damage: 55, mag: 6, reserve: 24, price: 2400 },
+    { id: 'carbine', name: 'PV-9 Carbine', damage: 22, mag: 24, reserve: 120, price: 2600 },
+    { id: 'revolver', name: 'Palma .44', damage: 40, mag: 6, reserve: 36, price: 1500 },
+    { id: 'bat', name: 'Palma Bat', damage: 18, mag: 0, reserve: 0, price: 200 },
+    { id: 'sniper', name: 'Mirador Longshot', damage: 70, mag: 5, reserve: 20, price: 3200 }
   ];
 
-  // Rank ladder for RP progression.
+  // Rank ladder for RP progression. These thresholds are the same
+  // ones progress.js uses (Runner 0, Wheelman 400, Fixer 1,200,
+  // Kingpin 2,600, Legend 5,200) — the two tables must stay in step,
+  // because the HUD reads this one and the dashboard reads that one.
   var RANKS = [
     { name: 'Runner', rp: 0 },
-    { name: 'Wheelman', rp: 800 },
-    { name: 'Fixer', rp: 2200 },
-    { name: 'Kingpin', rp: 5200 },
-    { name: 'Legend', rp: 10000 }
+    { name: 'Wheelman', rp: 400 },
+    { name: 'Fixer', rp: 1200 },
+    { name: 'Kingpin', rp: 2600 },
+    { name: 'Legend', rp: 5200 }
   ];
 
   // Police call-sign pool for dispatch. Fresh for this city.

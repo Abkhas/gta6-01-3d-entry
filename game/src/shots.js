@@ -352,10 +352,9 @@
           state.player.vehicle.y = road.y - 40;
           state.player.vehicle.altitude = 15;
           state.player.vehicle.speed = 58;
-          // Display-name shim: the HUD speedo reads vehicle.model.name,
-          // and a heli carries no car model. Staging-only, not a change
-          // to the Gull itself.
-          state.player.vehicle.model = { name: 'The Gull' };
+          // No display-name shim here: the HUD speedo and the
+          // fallback HUD both read the Gull by kind now, so a heli
+          // with no car model draws cleanly on its own.
           gullUsed = true;
         }
       } catch (e) {
@@ -455,39 +454,9 @@
       if (heliPos) {
         var hp = renderer.project(state.cam, heliPos.x, heliPos.y);
         var alt = heliPos.altitude || 15;
-        // Ground shadow, offset by the altitude.
-        ctx.fillStyle = 'rgba(0,0,0,0.30)';
-        ctx.beginPath();
-        ctx.ellipse(hp.x + alt * 2, hp.y + alt * 3, 52, 18, 0, 0, Math.PI * 2);
-        ctx.fill();
-        // Body, tail boom, rotor mast, and skids.
-        ctx.fillStyle = '#23262f';
-        ctx.beginPath();
-        ctx.ellipse(hp.x, hp.y, 46, 16, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#ffd166';
-        ctx.fillRect(hp.x - 40, hp.y - 4, 80, 5);
-        ctx.fillStyle = '#23262f';
-        ctx.fillRect(hp.x + 40, hp.y - 3, 52, 6);
-        ctx.fillRect(hp.x + 88, hp.y - 12, 6, 20);
-        ctx.fillStyle = '#c8d4e0';
-        ctx.beginPath();
-        ctx.ellipse(hp.x - 22, hp.y - 2, 14, 8, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#c8d4e0';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(hp.x - 58, hp.y - 16);
-        ctx.lineTo(hp.x + 58, hp.y - 16);
-        ctx.stroke();
-        ctx.strokeStyle = '#23262f';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(hp.x - 30, hp.y + 14);
-        ctx.lineTo(hp.x - 30, hp.y + 24);
-        ctx.moveTo(hp.x + 30, hp.y + 14);
-        ctx.lineTo(hp.x + 30, hp.y + 24);
-        ctx.stroke();
+        // The renderer already draws the Gull's body, rotor and
+        // ground shadow in the world pass, so the extras only add
+        // what it does not: the name tag and the altitude chip.
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 13px system-ui, sans-serif';
         ctx.textAlign = 'center';
