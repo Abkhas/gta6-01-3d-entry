@@ -6,7 +6,12 @@
 <title>Palma Verde — 3D</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #0b1622; }
-  #world { display: block; width: 100vw; height: 100vh; touch-action: none; }
+  #world { display: block; width: 100vw; height: calc(100vh - 34px); touch-action: none; }
+  #bar {
+    height: 34px; line-height: 34px; text-align: center;
+    font: 13px system-ui, sans-serif; color: #c9d2e0; background: #0b0e16;
+  }
+  #bar b { color: #ffd166; }
   #hud {
     position: fixed; left: 12px; top: 12px; z-index: 5;
     font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -23,11 +28,16 @@
 </head>
 <body>
 <canvas id="world"></canvas>
+<div id="hud3d"></div>
+<div id="bar"><b>PALMA VERDE</b> &nbsp;·&nbsp; WASD move / drive &nbsp;·&nbsp; E enter &amp; exit car / start mission &nbsp;·&nbsp; Mouse aim, click fire &nbsp;·&nbsp; R reload &nbsp;·&nbsp; Q radio &nbsp;·&nbsp; Z / X / V crew &nbsp;·&nbsp; Esc pause &nbsp;·&nbsp; F9 save</div>
 <div id="hud">
   <div class="title">PALMA VERDE</div>
   <div class="sub" id="hud-line">Loading the city&hellip;</div>
   <div class="err" id="hud-err"></div>
 </div>
+<script src="./src/hud3d.js"></script>
+<script src="./src/screens3d.js"></script>
+<script src="./src/shots3d.js"></script>
 <script type="module" src="./src/main3d.js"></script>
 </body>
 </html>
