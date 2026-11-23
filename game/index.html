@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Palma Verde — an open-world crime game</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #10141f; overflow: hidden; }
+  #game { display: block; width: 100vw; height: calc(100vh - 34px); }
+  #bar {
+    height: 34px; line-height: 34px; text-align: center;
+    font: 13px system-ui, sans-serif; color: #c9d2e0; background: #0b0e16;
+  }
+  #bar b { color: #ffd166; }
+  #err {
+    display: none; position: fixed; top: 10px; left: 10px; right: 10px;
+    background: #7a1d1d; color: #fff; padding: 10px 14px;
+    font: 14px system-ui, sans-serif; border-radius: 6px; z-index: 10;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<div id="bar"><b>PALMA VERDE</b> &nbsp;·&nbsp; WASD move / drive &nbsp;·&nbsp; E enter &amp; exit car &nbsp;·&nbsp; Mouse aim, click fire &nbsp;·&nbsp; R reload &nbsp;·&nbsp; Q radio &nbsp;·&nbsp; Esc pause &nbsp;·&nbsp; F9 save</div>
+<div id="err"></div>
+<script>
+  window.addEventListener('error', function (e) {
+    var box = document.getElementById('err');
+    box.style.display = 'block';
+    box.textContent = 'Palma Verde hit an error: ' + e.message;
+  });
+</script>
+<script src="src/config.js"></script>
+<script src="src/world.js"></script>
+<script src="src/render.js"></script>
+<script src="src/player.js"></script>
+<script src="src/vehicles.js"></script>
+<script src="src/main.js"></script>
+<script>
+  window.addEventListener('load', function () {
+    var canvas = document.getElementById('game');
+    function fit() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight - 34;
+    }
+    fit();
+    window.addEventListener('resize', fit);
+    window.PalmaMain.startGame(canvas);
+  });
+</script>
+</body>
+</html>
