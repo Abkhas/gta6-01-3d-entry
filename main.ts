@@ -1,51 +1,71 @@
-// Palma Verde — entrypoint: the dossier program.
+// Palma Verde 3D: the hand-in program for the gta6-01 bounty.
 //
-// The grader runs this file on Node 22, twice, in a container where
-// the repository is read-only and only the output directory is
-// writable. It is not the game's boot script — the game boots itself
-// from game/index.html in the browser, and nothing there loads this
-// file. This file hands the game in: it copies game/ and screenshots/
-// into the output directory and writes dossier.json with the kit's
-// buildDossier, so the gate can check the entry and the judge can
-// read it. Run it locally the same way:
-//   MAKEFUN_OUTPUT_DIR=out node main.ts
+// The grader runs this file on Node 22, twice, inside a container where the
+// repository is read-only and only the output directory is writable. This is
+// not the game's boot script: the game starts itself from game/index.html in
+// the browser, and nothing there loads this file. All this file does is hand
+// the entry in: it stages game/ (and screenshots/, when the renders exist)
+// into the output directory and writes the dossier for the repo.
+//
+// Run it as: MAKEFUN_OUTPUT_DIR=/tmp/palma3d-out node main.ts
 
-import { cp, mkdir, stat, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { buildDossier } from './vendor/makefun-game.ts';
+import { cp, mkdir, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { buildDossier } from "./vendor/makefun-game.ts";
 
-const REPO_ROOT = path.dirname(fileURLToPath(import.meta.url));
+// The folder holding this file is the repo root: game/ and screenshots/
+// both live beside it.
+const repoRoot = path.dirname(fileURLToPath(import.meta.url));
 
-async function copyIfPresent(from: string, to: string): Promise<boolean> {
+// Where the finished entry goes; the grader points this at its own
+// writable directory, and /output is the fallback when it says nothing.
+const outputDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
+
+// The bounty gate's caps, exactly as the gate states them.
+const dossierCaps = {
+  text_max_bytes: 163840,
+  screenshots: {
+    max: 4,
+    max_bytes: 262144,
+  },
+  game_max_files: 993,
+  game_max_bytes: 50331648,
+  game_path_max_bytes: 1000,
+};
+
+// True when `dir` exists and is a directory; false for anything else,
+// including a path that is simply not there yet.
+async function isDirectory(dir: string): Promise<boolean> {
   try {
-    await stat(from);
+    return (await stat(dir)).isDirectory();
   } catch {
     return false;
   }
-  await cp(from, to, { recursive: true });
-  return true;
 }
 
+// Stage the entry and write its dossier. Any failure is reported by the
+// caller, which exits non-zero.
 async function handIn(): Promise<void> {
-  const outDir = process.env.MAKEFUN_OUTPUT_DIR || '/output';
-  const gameDir = path.join(REPO_ROOT, 'game');
-  const shotsDir = path.join(REPO_ROOT, 'screenshots');
-  await mkdir(outDir, { recursive: true });
-  await cp(gameDir, path.join(outDir, 'game'), { recursive: true });
-  await copyIfPresent(shotsDir, path.join(outDir, 'screenshots'));
-  const caps = {
-    text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
-    game_max_files: 993,
-    game_max_bytes: 50331648,
-    game_path_max_bytes: 1000,
-  };
-  const dossier = buildDossier(REPO_ROOT, caps);
-  await writeFile(path.join(outDir, 'dossier.json'), dossier);
+  await mkdir(outputDir, { recursive: true });
+
+  await cp(path.join(repoRoot, "game"), path.join(outputDir, "game"), {
+    recursive: true,
+  });
+
+  const shotsDir = path.join(repoRoot, "screenshots");
+  if (await isDirectory(shotsDir)) {
+    await cp(shotsDir, path.join(outputDir, "screenshots"), {
+      recursive: true,
+    });
+  }
+
+  const dossier = buildDossier(repoRoot, dossierCaps);
+  await writeFile(path.join(outputDir, "dossier.json"), dossier);
 }
 
-handIn().catch((err: unknown) => {
-  console.error('Palma Verde hand-in failed: ' + (err instanceof Error ? err.message : String(err)));
+handIn().catch((error: unknown) => {
+  const detail = error instanceof Error ? error.message : String(error);
+  console.error(`main.ts: hand-in failed: ${detail}`);
   process.exit(1);
 });
