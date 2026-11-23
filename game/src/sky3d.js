@@ -213,6 +213,7 @@ export function setTimeOfDay(scene, grade, world = null) {
   if (world) {
     world.setWindowGlow(g.windowGlow);
     world.setLampGlow(g.neonGlow);
+    if (world.setNeonGlow) world.setNeonGlow(g.neonGlow);
   }
   sky.grade = g;
   return g;

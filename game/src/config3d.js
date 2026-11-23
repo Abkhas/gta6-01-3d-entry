@@ -86,6 +86,23 @@ export const CFG3D = {
     },
   ],
 
+  // ---- named landmarks -------------------------------------------------
+  // Five hand-placed landmarks with our own names (see CFG.LANDMARKS):
+  // the hotel, the lighthouse, the tallest tower, the market and the
+  // container cranes. They give the skyline its named silhouettes.
+  LANDMARKS: [
+    { id: 'miramar', name: 'Hotel Miramar', kind: 'hotel', x: -1100, z: -900,
+      blurb: 'The white slab over the Marina, lit floor by floor.' },
+    { id: 'faro', name: 'Faro de Palma', kind: 'lighthouse', x: -1900, z: 1010,
+      blurb: 'The old light at the end of the pier, still turning.' },
+    { id: 'brisa', name: 'Torre Brisa', kind: 'tower', x: 900, z: -900,
+      blurb: 'Northgate\'s tallest glass needle, seen from anywhere.' },
+    { id: 'mercado', name: 'Mercado Citrus', kind: 'market', x: -700, z: 100,
+      blurb: 'Stalls, awnings and oranges under the plane trees.' },
+    { id: 'muelle', name: 'Muelle Viejo', kind: 'cranes', x: 500, z: 1000,
+      blurb: 'The dock cranes, working the night shift.' },
+  ],
+
   // ---- time of day -----------------------------------------------------
   // Four grades. Night is dark blue with stars, a moon and lit windows —
   // never near-black: the player must always read the street.

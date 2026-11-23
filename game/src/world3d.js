@@ -102,6 +102,7 @@ export function buildWorld(scene, CFG = CFG3D) {
   const junctions = [];   // { x, z } road crossings (traffic-light sites)
   const trafficLights = [];
   const facadeMats = [];  // materials whose emissiveIntensity tracks night
+  const neonMats = [];    // neon sign materials, bright at night
   const roadCentres = []; // road centreline coordinates, one axis
 
   for (let c = -HALF; c <= HALF; c += BLOCK) roadCentres.push(c);
@@ -231,10 +232,14 @@ export function buildWorld(scene, CFG = CFG3D) {
   }
 
   const blockN = Math.round((HALF * 2) / BLOCK); // 14 blocks per side
+  // Landmark blocks are reserved for hand-placed landmarks (CFG.LANDMARKS);
+  // no generated buildings grow here.
+  const landmarkBlocks = new Set(['-1100,-900', '900,-900', '-700,100', '300,900', '300,1100', '700,1100']);
   for (let bi = 0; bi < blockN; bi++) {
     for (let bj = 0; bj < blockN; bj++) {
       const cx = -HALF + (bi + 0.5) * BLOCK;
       const cz = -HALF + (bj + 0.5) * BLOCK;
+      if (landmarkBlocks.has(cx + ',' + cz)) continue;
       // Highway corridors stay clear.
       if (Math.abs(cz - HW_N) < HW_W / 2 + BLOCK / 2) continue;
       if (Math.abs(cx - HW_E) < HW_W / 2 + BLOCK / 2) continue;
@@ -320,6 +325,220 @@ export function buildWorld(scene, CFG = CFG3D) {
   const wheelLegB = box(1.5, 34, 1.5, spokeMat, wheelX + 6, 17, CFG.PIER_Z, pierGroup);
   wheelLegA.rotation.z = 0.18;
   wheelLegB.rotation.z = -0.18;
+
+  // ---- landmarks ---------------------------------------------------------
+  // Hand-placed, one of each kind, from CFG.LANDMARKS. Distinct silhouettes
+  // so the skyline reads from the title screen and the chase camera.
+  const landmarks = [];
+  const yachts = [];
+
+  // Hotel Miramar: a tall white slab with a lit crown, over the Marina.
+  {
+    const hm = new THREE.MeshStandardMaterial({ color: '#e8e2d4', roughness: 0.7 });
+    const hotel = box(64, 96, 30, hm, -1100, 48, -900);
+    const crownMat = new THREE.MeshStandardMaterial({
+      color: '#ffd98a', emissive: new THREE.Color('#ffbe5c'), emissiveIntensity: 0.4,
+    });
+    neonMats.push(crownMat);
+    box(66, 3, 32, crownMat, -1100, 97, -900);
+    const hotelTex = facadeTextures('#e8e2d4', '#256b74', 0.4, rng);
+    hotel.material = new THREE.MeshStandardMaterial({
+      map: hotelTex.map, emissiveMap: hotelTex.emissive,
+      emissive: new THREE.Color('#ffb45c'), emissiveIntensity: 0.15, roughness: 0.7,
+    });
+    facadeMats.push(hotel.material);
+    landmarks.push({ id: 'miramar', mesh: hotel });
+    colliders.push({ x0: -1132, z0: -915, x1: -1068, z1: -885, h: 96 });
+  }
+
+  // Torre Brisa: Northgate's tallest needle, stepped glass crown.
+  {
+    const tm = new THREE.MeshStandardMaterial({ color: '#7fa0c4', roughness: 0.25, metalness: 0.55 });
+    const tower = box(44, 170, 44, tm, 900, 85, -900);
+    box(30, 26, 30, tm, 900, 183, -900);
+    const tipMat = new THREE.MeshStandardMaterial({
+      color: '#ff5c7a', emissive: new THREE.Color('#ff2a4a'), emissiveIntensity: 1.2,
+    });
+    neonMats.push(tipMat);
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(2.2, 10, 8), tipMat);
+    tip.position.set(900, 198, -900);
+    group.add(tip);
+    landmarks.push({ id: 'brisa', mesh: tower });
+    colliders.push({ x0: 878, z0: -922, x1: 922, z1: -878, h: 196 });
+  }
+
+  // Faro de Palma: striped lighthouse at the pier end, lamp room glowing.
+  {
+    const lhGroup = new THREE.Group();
+    lhGroup.position.set(-1900, 0, 1010);
+    const stripeWhite = new THREE.MeshStandardMaterial({ color: '#f2ede2', roughness: 0.8 });
+    const stripeRed = new THREE.MeshStandardMaterial({ color: '#c0392b', roughness: 0.8 });
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(6, 8, 10, 12), stripeWhite);
+    base.position.y = 5;
+    const mid = new THREE.Mesh(new THREE.CylinderGeometry(4.5, 6, 16, 12), stripeRed);
+    mid.position.y = 18;
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(3.5, 4.5, 14, 12), stripeWhite);
+    top.position.y = 33;
+    const lampMat = new THREE.MeshStandardMaterial({
+      color: '#fff6c8', emissive: new THREE.Color('#ffe98a'), emissiveIntensity: 2.4,
+    });
+    neonMats.push(lampMat);
+    const lamp = new THREE.Mesh(new THREE.CylinderGeometry(3, 3, 5, 10), lampMat);
+    lamp.position.y = 42;
+    const cap = new THREE.Mesh(new THREE.ConeGeometry(4, 4, 10), stripeRed);
+    cap.position.y = 46;
+    lhGroup.add(base, mid, top, lamp, cap);
+    lhGroup.traverse((o) => { if (o.isMesh) { o.castShadow = true; } });
+    group.add(lhGroup);
+    landmarks.push({ id: 'faro', mesh: lhGroup });
+  }
+
+  // Mercado Citrus: striped-awning stalls around the plaza block.
+  {
+    const awningTex = canvasTexture(128, 64, (g, w, h) => {
+      for (let x = 0; x < w; x += 16) {
+        g.fillStyle = (x / 16) % 2 === 0 ? '#e2725b' : '#f2ead8';
+        g.fillRect(x, 0, 16, h);
+      }
+    });
+    awningTex.wrapS = awningTex.wrapT = THREE.RepeatWrapping;
+    const stallBaseMat = mat('#6e4f30', { roughness: 1 });
+    const goodsColors = ['#e07840', '#e8c53a', '#6a8f5a', '#e86a92', '#3d7ea6'];
+    const stalls = [];
+    for (let i = 0; i < 10; i++) {
+      const sx = -700 + (i % 5) * 34 - 68;
+      const sz = 100 + (i < 5 ? -28 : 28);
+      const stall = new THREE.Group();
+      stall.position.set(sx, 0, sz);
+      const counter = new THREE.Mesh(new THREE.BoxGeometry(10, 2.4, 5), stallBaseMat);
+      counter.position.y = 1.2;
+      counter.castShadow = true;
+      const awning = new THREE.Mesh(
+        new THREE.PlaneGeometry(11, 6),
+        new THREE.MeshStandardMaterial({ map: awningTex, roughness: 0.9, side: THREE.DoubleSide }),
+      );
+      awning.rotation.x = -Math.PI / 2 + 0.5;
+      awning.position.y = 4.2;
+      const goods = new THREE.Mesh(
+        new THREE.BoxGeometry(8, 1, 3.5),
+        mat(goodsColors[i % goodsColors.length], { roughness: 0.9 }),
+      );
+      goods.position.y = 2.9;
+      stall.add(counter, awning, goods);
+      group.add(stall);
+      stalls.push(stall);
+    }
+    landmarks.push({ id: 'mercado', mesh: stalls[0] });
+    colliders.push({ x0: -790, z0: 60, x1: -610, z1: 140, h: 5 });
+  }
+
+  // Muelle Viejo: container yard + two gantry cranes in The Docks.
+  {
+    const contColors = ['#c0392b', '#2e6f7e', '#e8a13a', '#6a8f5a', '#8c5a8c'];
+    for (let s = 0; s < 3; s++) {
+      for (let l = 0; l < 3; l++) {
+        const cMat = mat(contColors[(s * 3 + l) % contColors.length], { roughness: 0.85, metalness: 0.2 });
+        const c = box(14, 3.2, 3.4, cMat, 250 + s * 44, 1.6 + l * 3.3, 880 + (s % 2) * 18);
+        c.rotation.y = 0.06 * s;
+      }
+    }
+    colliders.push({ x0: 240, z0: 860, x1: 380, z1: 920, h: 10 });
+    const craneMat = new THREE.MeshStandardMaterial({ color: '#d8a13a', roughness: 0.6, metalness: 0.4 });
+    for (const cx of [300, 700]) {
+      const crane = new THREE.Group();
+      crane.position.set(cx, 0, 1100);
+      const legA = new THREE.Mesh(new THREE.BoxGeometry(2, 42, 2), craneMat);
+      legA.position.set(-10, 21, 0);
+      const legB = new THREE.Mesh(new THREE.BoxGeometry(2, 42, 2), craneMat);
+      legB.position.set(10, 21, 0);
+      const jib = new THREE.Mesh(new THREE.BoxGeometry(64, 2.5, 2.5), craneMat);
+      jib.position.set(8, 43, 0);
+      const cable = new THREE.Mesh(new THREE.BoxGeometry(0.4, 12, 0.4), craneMat);
+      cable.position.set(28, 36, 0);
+      const hook = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 4), craneMat);
+      hook.position.set(28, 29, 0);
+      crane.add(legA, legB, jib, cable, hook);
+      crane.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+      group.add(crane);
+    }
+    landmarks.push({ id: 'muelle', mesh: group });
+  }
+
+  // Yachts moored off the Marina shore: hull, mast and a white sail.
+  {
+    const hullMat = new THREE.MeshStandardMaterial({ color: '#f2f2ee', roughness: 0.4 });
+    const sailMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.9, side: THREE.DoubleSide });
+    const mastMat = new THREE.MeshStandardMaterial({ color: '#5a5148', roughness: 0.7 });
+    for (let i = 0; i < 7; i++) {
+      const y = new THREE.Group();
+      const yx = -1740 - rng() * 160;
+      const yz = -1250 + i * 130 + rng() * 40;
+      y.position.set(yx, -0.2, yz);
+      y.rotation.y = rng() * Math.PI * 2;
+      const hull = new THREE.Mesh(new THREE.BoxGeometry(16, 2.6, 5), hullMat);
+      hull.position.y = 1.0;
+      const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 14, 6), mastMat);
+      mast.position.y = 9;
+      const sail = new THREE.Mesh(new THREE.PlaneGeometry(7, 11), sailMat);
+      sail.position.set(2.2, 9, 0);
+      y.add(hull, mast, sail);
+      y.userData.phase = rng() * Math.PI * 2;
+      group.add(y);
+      yachts.push(y);
+    }
+  }
+
+  // Beach umbrellas: instanced poles + striped canopies along the sand.
+  const umbrellaSpots = [];
+  for (let z = -HALF + 80; z <= HALF - 80; z += 55) {
+    if (Math.abs(z - CFG.PIER_Z) < 90) continue; // keep the pier approach clear
+    umbrellaSpots.push([CFG.BEACH_X - 30 - rng() * 130, z + (rng() - 0.5) * 24]);
+  }
+  {
+    const poleGeo = new THREE.CylinderGeometry(0.12, 0.12, 3.4, 6);
+    const poleMat = new THREE.MeshStandardMaterial({ color: '#e8e0cc', roughness: 0.9 });
+    const poles = new THREE.InstancedMesh(poleGeo, poleMat, umbrellaSpots.length);
+    const canopyGeo = new THREE.ConeGeometry(3.6, 1.6, 10, 1, true);
+    const canopyMat = new THREE.MeshStandardMaterial({
+      color: '#e2725b', roughness: 0.9, side: THREE.DoubleSide,
+    });
+    const canopies = new THREE.InstancedMesh(canopyGeo, canopyMat, umbrellaSpots.length);
+    umbrellaSpots.forEach(([x, z], i) => {
+      dummy.position.set(x, 1.7, z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      poles.setMatrixAt(i, dummy.matrix);
+      dummy.position.set(x, 3.9, z);
+      dummy.rotation.set(0, rng() * Math.PI, 0);
+      dummy.updateMatrix();
+      canopies.setMatrixAt(i, dummy.matrix);
+    });
+    poles.instanceMatrix.needsUpdate = true;
+    canopies.instanceMatrix.needsUpdate = true;
+    group.add(poles);
+    group.add(canopies);
+  }
+
+  // Neon signs: glowing strips on shopfronts in Citrus Lane + Boardwalk.
+  // Each sign hangs on a building face; its material brightens at night.
+  {
+    const neonColors = ['#ff5c8a', '#2ad8ff', '#ffe14d', '#4dff88', '#c07aff'];
+    let placed = 0;
+    for (const b of buildings) {
+      if (placed >= 26) break;
+      if (b.district.id !== 'citrus' && b.district.id !== 'boardwalk') continue;
+      if (rng() < 0.55) continue;
+      const color = neonColors[Math.floor(rng() * neonColors.length)];
+      const nm = new THREE.MeshStandardMaterial({
+        color: '#111111', emissive: new THREE.Color(color), emissiveIntensity: 0.35,
+      });
+      neonMats.push(nm);
+      const sign = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(b.w * 0.6, 18), 2.2), nm);
+      sign.position.set(b.x, b.h * 0.55, b.z + b.d / 2 + 0.2);
+      group.add(sign);
+      placed++;
+    }
+  }
 
   // ---- palms ---------------------------------------------------------------
   // Instanced trunks + instanced crowns: cheap at a few hundred palms.
@@ -450,12 +669,15 @@ export function buildWorld(scene, CFG = CFG3D) {
   function setLampGlow(v) {
     lampHeadMat.emissiveIntensity = 0.1 + v * 1.6;
   }
+  function setNeonGlow(v) {
+    for (const m of neonMats) m.emissiveIntensity = 0.3 + v * 1.8;
+  }
 
   return {
     group, roads: roadCentres, junctions, trafficLights, buildings, colliders,
     palms: palmSpots, lamps: lampHeads, ocean, beach, pier: pierGroup, wheel,
-    facadeMats, lampHeadMat,
+    facadeMats, lampHeadMat, landmarks, yachts, umbrellas: umbrellaSpots, neonMats,
     districtAt, isSolid, nearestRoadPoint, randomRoadSpot,
-    updateTrafficLights, setWindowGlow, setLampGlow,
+    updateTrafficLights, setWindowGlow, setLampGlow, setNeonGlow,
   };
 }
