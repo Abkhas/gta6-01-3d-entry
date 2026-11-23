@@ -18,7 +18,7 @@
 //   state.missions.completed, state.activitiesDone (count),
 //   state.collectibles.found, state.properties.owned, state.completion.
 
-export const RANKS = [
+const RANKS = [
   { id: 'runner', name: 'Runner', rpNeeded: 0, tagline: 'New boots on the Boardwalk.' },
   { id: 'wheelman', name: 'Wheelman', rpNeeded: 400, tagline: 'The wheel answers to you now.' },
   { id: 'fixer', name: 'Fixer', rpNeeded: 1200, tagline: 'People call you when it matters.' },
@@ -26,7 +26,7 @@ export const RANKS = [
   { id: 'legend', name: 'Legend', rpNeeded: 5200, tagline: 'Palma Verde tells stories about you.' },
 ];
 
-export const DISTRICT_NAMES = [
+const DISTRICT_NAMES = [
   'Marina',
   'Old Town',
   'Citrus Lane',
@@ -36,15 +36,15 @@ export const DISTRICT_NAMES = [
   'Northgate',
 ];
 
-export const SAVE_KEY = 'palma-verde-saves-v1';
-export const SAVE_SLOTS = 3;
+const SAVE_KEY = 'palma-verde-saves-v1';
+const SAVE_SLOTS = 3;
 
 // Completion weights: the four buckets add to 100. Missions matter
 // most; the other three split the rest evenly-ish.
-export const COMPLETION_WEIGHTS = { missions: 40, activities: 20, collectibles: 20, properties: 20 };
-export const TOTALS = { missions: 10, activities: 28, collectibles: 12, properties: 3 };
+const COMPLETION_WEIGHTS = { missions: 40, activities: 20, collectibles: 20, properties: 20 };
+const TOTALS = { missions: 10, activities: 28, collectibles: 12, properties: 3 };
 
-export function rankForRp(rp) {
+function rankForRp(rp) {
   let current = RANKS[0];
   for (const rank of RANKS) {
     if (rp >= rank.rpNeeded) current = rank;
@@ -52,7 +52,7 @@ export function rankForRp(rp) {
   return current;
 }
 
-export function rankProgress(rp) {
+function rankProgress(rp) {
   const current = rankForRp(rp);
   const index = RANKS.indexOf(current);
   const next = RANKS[index + 1] || null;
@@ -64,7 +64,7 @@ export function rankProgress(rp) {
 
 // Add RP and return the new rank state. If the player crossed into a
 // new rank, `rankedUp` carries the new rank so the HUD can celebrate.
-export function addRp(state, amount) {
+function addRp(state, amount) {
   if (typeof state.rp !== 'number') state.rp = 0;
   const before = rankForRp(state.rp);
   state.rp += amount;
@@ -78,19 +78,19 @@ export function addRp(state, amount) {
   };
 }
 
-export function addRespect(state, amount) {
+function addRespect(state, amount) {
   if (typeof state.respect !== 'number') state.respect = 0;
   state.respect = Math.max(0, Math.min(100, state.respect + amount));
   return state.respect;
 }
 
-export function freshStanding() {
+function freshStanding() {
   const out = {};
   for (const name of DISTRICT_NAMES) out[name] = 0;
   return out;
 }
 
-export function ensureStanding(state) {
+function ensureStanding(state) {
   if (!state.standing) state.standing = freshStanding();
   for (const name of DISTRICT_NAMES) {
     if (typeof state.standing[name] !== 'number') state.standing[name] = 0;
@@ -98,14 +98,14 @@ export function ensureStanding(state) {
   return state.standing;
 }
 
-export function addStanding(state, district, amount) {
+function addStanding(state, district, amount) {
   ensureStanding(state);
   if (!(district in state.standing)) return null;
   state.standing[district] = Math.max(0, Math.min(100, state.standing[district] + amount));
   return state.standing[district];
 }
 
-export function standingSummary(state) {
+function standingSummary(state) {
   ensureStanding(state);
   return DISTRICT_NAMES.map((name) => ({ district: name, value: state.standing[name] }));
 }
@@ -114,7 +114,7 @@ export function standingSummary(state) {
 // test (or a later rebalance) override the denominators; the defaults
 // match the shipped game: 10 missions, 28 activities, 12 sun-discs,
 // 3 properties.
-export function completionPercent(state, totals) {
+function completionPercent(state, totals) {
   const t = { ...TOTALS, ...(totals || {}) };
   const w = COMPLETION_WEIGHTS;
   const missionCount = Array.isArray(state.missions?.completed) ? state.missions.completed.length : 0;
@@ -129,21 +129,21 @@ export function completionPercent(state, totals) {
   return Math.max(0, Math.min(100, Math.round(total * 10) / 10));
 }
 
-export function refreshCompletion(state, totals) {
+function refreshCompletion(state, totals) {
   state.completion = completionPercent(state, totals);
   return state.completion;
 }
 
 // Act is derived from mission progress: Act I until mission 4 is done,
 // Act II until mission 8 is done, Act III after that.
-export function actForState(state) {
+function actForState(state) {
   const done = Array.isArray(state.missions?.completed) ? state.missions.completed.length : 0;
   if (done >= 8) return 'ACT III';
   if (done >= 4) return 'ACT II';
   return 'ACT I';
 }
 
-export function currentMissionName(state) {
+function currentMissionName(state) {
   if (!state.missions?.current) return '—';
   return state.missions.current;
 }
@@ -183,7 +183,7 @@ function writeAllSlots(storage, slots) {
   }
 }
 
-export function listSaveSlots(storage) {
+function listSaveSlots(storage) {
   return readAllSlots(storage).map((slot, i) => ({
     slot: i + 1,
     empty: !slot,
@@ -197,7 +197,7 @@ export function listSaveSlots(storage) {
   }));
 }
 
-export function saveGame(state, slotIndex, storage) {
+function saveGame(state, slotIndex, storage) {
   if (slotIndex < 0 || slotIndex > 2) return { ok: false, reason: 'bad-slot' };
   const slots = readAllSlots(storage);
   const snapshot = {
@@ -216,7 +216,7 @@ export function saveGame(state, slotIndex, storage) {
   return { ok, slot: slotIndex + 1, snapshot: listSaveSlots(storage)[slotIndex] };
 }
 
-export function loadGame(slotIndex, storage) {
+function loadGame(slotIndex, storage) {
   if (slotIndex < 0 || slotIndex > 2) return { ok: false, reason: 'bad-slot' };
   const slots = readAllSlots(storage);
   const slot = slots[slotIndex];
@@ -224,14 +224,14 @@ export function loadGame(slotIndex, storage) {
   return { ok: true, slot: slotIndex + 1, state: slot.data };
 }
 
-export function clearSaveSlot(slotIndex, storage) {
+function clearSaveSlot(slotIndex, storage) {
   if (slotIndex < 0 || slotIndex > 2) return { ok: false, reason: 'bad-slot' };
   const slots = readAllSlots(storage);
   slots[slotIndex] = null;
   return { ok: writeAllSlots(storage, slots), slot: slotIndex + 1 };
 }
 
-export function dashboardNumbers(state, totals) {
+function dashboardNumbers(state, totals) {
   const progress = rankProgress(state.rp || 0);
   return {
     missions: `${Array.isArray(state.missions?.completed) ? state.missions.completed.length : 0}/${TOTALS.missions}`,
@@ -250,3 +250,18 @@ export function dashboardNumbers(state, totals) {
     standing: standingSummary(state),
   };
 }
+
+// Classic-script export: the browser loads this file with a plain
+// <script> tag, so the public API is published on window.
+window.PalmaProgress = {
+  RANKS: RANKS, DISTRICT_NAMES: DISTRICT_NAMES, SAVE_KEY: SAVE_KEY,
+  SAVE_SLOTS: SAVE_SLOTS, COMPLETION_WEIGHTS: COMPLETION_WEIGHTS,
+  TOTALS: TOTALS, rankForRp: rankForRp, rankProgress: rankProgress,
+  addRp: addRp, addRespect: addRespect, freshStanding: freshStanding,
+  ensureStanding: ensureStanding, addStanding: addStanding,
+  standingSummary: standingSummary, completionPercent: completionPercent,
+  refreshCompletion: refreshCompletion, actForState: actForState,
+  currentMissionName: currentMissionName, listSaveSlots: listSaveSlots,
+  saveGame: saveGame, loadGame: loadGame, clearSaveSlot: clearSaveSlot,
+  dashboardNumbers: dashboardNumbers,
+};

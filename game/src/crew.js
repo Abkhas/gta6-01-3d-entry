@@ -18,7 +18,7 @@
 // the game, a fake clock in tests) so nothing here reads the real clock
 // behind the caller's back. No canvas, no DOM in this file.
 
-export const CREW = [
+const CREW = [
   {
     id: 'tuck',
     name: 'Tuck Ibarra',
@@ -57,11 +57,11 @@ export const CREW = [
   },
 ];
 
-export function crewById(id) {
+function crewById(id) {
   return CREW.find((c) => c.id === id) || null;
 }
 
-export function freshCrew() {
+function freshCrew() {
   const out = {};
   for (const member of CREW) {
     out[member.id] = { cooldown: 0, activeUntil: 0, revealing: false };
@@ -69,7 +69,7 @@ export function freshCrew() {
   return out;
 }
 
-export function ensureCrew(state) {
+function ensureCrew(state) {
   if (!state.crew) state.crew = freshCrew();
   for (const member of CREW) {
     if (!state.crew[member.id]) state.crew[member.id] = { cooldown: 0, activeUntil: 0, revealing: false };
@@ -80,7 +80,7 @@ export function ensureCrew(state) {
 
 // Count every cooldown down by dtSeconds. Call once per frame (or once
 // per tick) from the main loop; never call it from inside useAbility.
-export function tickCrew(state, dtSeconds, nowMs) {
+function tickCrew(state, dtSeconds, nowMs) {
   ensureCrew(state);
   const now = typeof nowMs === 'number' ? nowMs : Date.now();
   for (const member of CREW) {
@@ -94,7 +94,7 @@ export function tickCrew(state, dtSeconds, nowMs) {
   return state.crew;
 }
 
-export function crewReady(state, id) {
+function crewReady(state, id) {
   ensureCrew(state);
   const member = crewById(id);
   if (!member) return { ready: false, reason: 'no-such-crew' };
@@ -107,7 +107,7 @@ export function crewReady(state, id) {
   return { ready: true };
 }
 
-export function crewStatus(state, nowMs) {
+function crewStatus(state, nowMs) {
   ensureCrew(state);
   const now = typeof nowMs === 'number' ? nowMs : Date.now();
   return CREW.map((member) => {
@@ -135,7 +135,7 @@ export function crewStatus(state, nowMs) {
 // with a reason the HUD can show ("cooling-down", "not-enough-rp",
 // "nothing-to-fix", "not-in-a-car"). The RP price is charged only when
 // the ability actually applies.
-export function useAbility(state, id, nowMs) {
+function useAbility(state, id, nowMs) {
   ensureCrew(state);
   const member = crewById(id);
   if (!member) return { ok: false, reason: 'no-such-crew' };
@@ -169,8 +169,17 @@ export function useAbility(state, id, nowMs) {
   return { ok: true, applied, ability: member.ability, name: member.name, cooldown: member.cooldownSeconds };
 }
 
-export function policeRevealed(state, nowMs) {
+function policeRevealed(state, nowMs) {
   ensureCrew(state);
   const now = typeof nowMs === 'number' ? nowMs : Date.now();
   return !!state.crew.kip.revealing && state.crew.kip.activeUntil > now;
 }
+
+// Classic-script export: the browser loads this file with a plain
+// <script> tag, so the public API is published on window.
+window.PalmaCrew = {
+  CREW: CREW, crewById: crewById, freshCrew: freshCrew,
+  ensureCrew: ensureCrew, tickCrew: tickCrew, crewReady: crewReady,
+  crewStatus: crewStatus, useAbility: useAbility,
+  policeRevealed: policeRevealed,
+};

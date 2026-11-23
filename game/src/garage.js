@@ -16,7 +16,7 @@
 //   state.racesWon, state.activitiesDone (counters other systems read)
 // No canvas, no DOM in this file.
 
-export const UPGRADE_ROWS = [
+const UPGRADE_ROWS = [
   {
     row: 'ENGINE',
     blurb: 'More pull off the line, higher top speed.',
@@ -55,9 +55,9 @@ export const UPGRADE_ROWS = [
   },
 ];
 
-export const REPAIR_FULL_PRICE = 600;
+const REPAIR_FULL_PRICE = 600;
 
-export const GARAGE_CARS = [
+const GARAGE_CARS = [
   { model: 'Cometa GT', price: 0, note: 'Story car — earned, not bought.' },
   { model: 'Marina Runabout', price: 4500, note: 'Nimble, cheap, easy to park.' },
   { model: 'Citrus Coupe', price: 9000, note: 'Quick off the line, light on armor.' },
@@ -65,7 +65,7 @@ export const GARAGE_CARS = [
   { model: 'Palm Cruiser', price: 18000, note: 'Long, low, and loud in the best way.' },
 ];
 
-export const PROPERTIES = [
+const PROPERTIES = [
   {
     id: 'boardwalk-flat',
     name: 'Boardwalk Flat',
@@ -92,7 +92,7 @@ export const PROPERTIES = [
   },
 ];
 
-export const SUN_DISCS = [
+const SUN_DISCS = [
   { id: 'disc-marina-pier', district: 'Marina', place: 'Pier end' },
   { id: 'disc-marina-lighthouse', district: 'Marina', place: 'Lighthouse base' },
   { id: 'disc-oldtown-church', district: 'Old Town', place: 'Church square' },
@@ -107,7 +107,7 @@ export const SUN_DISCS = [
   { id: 'disc-northgate-bridge', district: 'Northgate', place: 'Bridge north end' },
 ];
 
-export const STREET_RACES = [
+const STREET_RACES = [
   {
     id: 'race-boardwalk',
     name: 'Boardwalk Sprint',
@@ -137,7 +137,7 @@ export const STREET_RACES = [
   },
 ];
 
-export function ensureGarage(state) {
+function ensureGarage(state) {
   if (!state.garage) state.garage = { owned: [], upgrades: {} };
   if (!Array.isArray(state.garage.owned)) state.garage.owned = [];
   if (!state.garage.upgrades) state.garage.upgrades = {};
@@ -164,7 +164,7 @@ function carUpgrades(state, model) {
 // Buy one upgrade level for the player's current car. Levels must be
 // bought in order; buying level 2 while level 1 is missing is refused.
 // PAINT sets the colour name instead of raising a number.
-export function buyUpgrade(state, row, level) {
+function buyUpgrade(state, row, level) {
   ensureGarage(state);
   const rowDef = UPGRADE_ROWS.find((r) => r.row === row);
   if (!rowDef) return { ok: false, reason: 'no-such-row' };
@@ -184,7 +184,7 @@ export function buyUpgrade(state, row, level) {
   return { ok: true, row, level, name: levelDef.name, price: levelDef.price, moneyLeft: state.player.money };
 }
 
-export function repairVehicle(state, price) {
+function repairVehicle(state, price) {
   ensureGarage(state);
   const vehicle = state.player?.vehicle;
   if (!vehicle) return { ok: false, reason: 'not-in-a-car' };
@@ -197,7 +197,7 @@ export function repairVehicle(state, price) {
   return { ok: true, cost, moneyLeft: state.player.money };
 }
 
-export function buyCar(state, model) {
+function buyCar(state, model) {
   ensureGarage(state);
   const car = GARAGE_CARS.find((c) => c.model === model);
   if (!car) return { ok: false, reason: 'no-such-car' };
@@ -207,7 +207,7 @@ export function buyCar(state, model) {
   return { ok: true, model, price: car.price, moneyLeft: state.player.money };
 }
 
-export function garageRows(state) {
+function garageRows(state) {
   ensureGarage(state);
   const model = state.player?.vehicle?.model || 'Cometa GT';
   const owned = carUpgrades(state, model);
@@ -226,7 +226,7 @@ export function garageRows(state) {
   }));
 }
 
-export function buyProperty(state, id) {
+function buyProperty(state, id) {
   ensureGarage(state);
   const prop = PROPERTIES.find((p) => p.id === id);
   if (!prop) return { ok: false, reason: 'no-such-property' };
@@ -238,7 +238,7 @@ export function buyProperty(state, id) {
 
 // One income tick (called on the game's slow timer). Each owned
 // property pays its per-tick income into the player's money.
-export function collectPropertyIncome(state) {
+function collectPropertyIncome(state) {
   ensureGarage(state);
   let total = 0;
   for (const id of state.properties.owned) {
@@ -249,7 +249,7 @@ export function collectPropertyIncome(state) {
   return { paid: total, money: state.player?.money ?? 0 };
 }
 
-export function propertySummary(state) {
+function propertySummary(state) {
   ensureGarage(state);
   return PROPERTIES.map((p) => ({
     id: p.id,
@@ -261,7 +261,7 @@ export function propertySummary(state) {
   }));
 }
 
-export function collectSunDisc(state, id) {
+function collectSunDisc(state, id) {
   ensureGarage(state);
   const disc = SUN_DISCS.find((d) => d.id === id);
   if (!disc) return { ok: false, reason: 'no-such-disc' };
@@ -277,7 +277,7 @@ export function collectSunDisc(state, id) {
   };
 }
 
-export function sunDiscSummary(state) {
+function sunDiscSummary(state) {
   ensureGarage(state);
   return SUN_DISCS.map((d) => ({
     id: d.id,
@@ -287,7 +287,7 @@ export function sunDiscSummary(state) {
   }));
 }
 
-export function enterRace(state, id) {
+function enterRace(state, id) {
   ensureGarage(state);
   const race = STREET_RACES.find((r) => r.id === id);
   if (!race) return { ok: false, reason: 'no-such-race' };
@@ -295,7 +295,7 @@ export function enterRace(state, id) {
   return { ok: true, id, name: race.name, fee: race.entryFee, laps: race.laps, moneyLeft: state.player.money };
 }
 
-export function finishRace(state, id, won) {
+function finishRace(state, id, won) {
   ensureGarage(state);
   const race = STREET_RACES.find((r) => r.id === id);
   if (!race) return { ok: false, reason: 'no-such-race' };
@@ -307,7 +307,7 @@ export function finishRace(state, id, won) {
   return { ok: true, won: true, payout: race.payout, money: state.player.money };
 }
 
-export function raceSummary(state) {
+function raceSummary(state) {
   ensureGarage(state);
   return STREET_RACES.map((r) => ({
     id: r.id,
@@ -318,3 +318,17 @@ export function raceSummary(state) {
     laps: r.laps,
   }));
 }
+
+// Classic-script export: the browser loads this file with a plain
+// <script> tag, so the public API is published on window.
+window.PalmaGarage = {
+  UPGRADE_ROWS: UPGRADE_ROWS, REPAIR_FULL_PRICE: REPAIR_FULL_PRICE,
+  GARAGE_CARS: GARAGE_CARS, PROPERTIES: PROPERTIES, SUN_DISCS: SUN_DISCS,
+  STREET_RACES: STREET_RACES, ensureGarage: ensureGarage,
+  buyUpgrade: buyUpgrade, repairVehicle: repairVehicle, buyCar: buyCar,
+  garageRows: garageRows, buyProperty: buyProperty,
+  collectPropertyIncome: collectPropertyIncome,
+  propertySummary: propertySummary, collectSunDisc: collectSunDisc,
+  sunDiscSummary: sunDiscSummary, enterRace: enterRace,
+  finishRace: finishRace, raceSummary: raceSummary,
+};

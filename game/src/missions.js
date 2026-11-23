@@ -28,9 +28,9 @@
 //   state.missions = { current: <id|null>, stage: <index>, completed: [<id>] }
 //   state.player.money, state.rp, state.wanted, state.respect
 
-export const STAGE_TYPES = ['drive-to', 'shoot', 'deliver', 'race', 'escort', 'pickup'];
+const STAGE_TYPES = ['drive-to', 'shoot', 'deliver', 'race', 'escort', 'pickup'];
 
-export const DISTRICTS = [
+const DISTRICTS = [
   'Marina',
   'Old Town',
   'Citrus Lane',
@@ -43,7 +43,7 @@ export const DISTRICTS = [
 // Every mission is plain data. A stage carries everything the HUD needs:
 // a type, a place to point the route at, one short objective line, and
 // the dialogue spoken when the stage begins. Nothing here runs code.
-export const MISSIONS = [
+const MISSIONS = [
   {
     id: 'the-debt',
     num: 1,
@@ -280,7 +280,7 @@ export const MISSIONS = [
   },
 ];
 
-export const MISSIONS_PART2 = [
+const MISSIONS_PART2 = [
   {
     id: 'old-town-score',
     num: 6,
@@ -562,11 +562,11 @@ MISSIONS.push(...MISSIONS_PART2);
 // outside contact is the hooks object described at the top of this file.
 // ---------------------------------------------------------------------------
 
-export function missionById(id) {
+function missionById(id) {
   return MISSIONS.find((m) => m.id === id) || null;
 }
 
-export function missionList() {
+function missionList() {
   return MISSIONS.map((m) => ({
     id: m.id,
     num: m.num,
@@ -579,14 +579,14 @@ export function missionList() {
   }));
 }
 
-export function ensureMissionState(state) {
+function ensureMissionState(state) {
   if (!state.missions) state.missions = { current: null, stage: 0, completed: [] };
   if (!Array.isArray(state.missions.completed)) state.missions.completed = [];
   if (typeof state.missions.stage !== 'number') state.missions.stage = 0;
   return state.missions;
 }
 
-export function isMissionUnlocked(state, id) {
+function isMissionUnlocked(state, id) {
   const target = missionById(id);
   if (!target) return false;
   ensureMissionState(state);
@@ -595,19 +595,19 @@ export function isMissionUnlocked(state, id) {
   return prev ? state.missions.completed.includes(prev.id) : false;
 }
 
-export function currentMission(state) {
+function currentMission(state) {
   ensureMissionState(state);
   if (!state.missions.current) return null;
   return missionById(state.missions.current);
 }
 
-export function currentStage(state) {
+function currentStage(state) {
   const mission = currentMission(state);
   if (!mission) return null;
   return mission.stages[state.missions.stage] || null;
 }
 
-export function stageProgress(state) {
+function stageProgress(state) {
   const mission = currentMission(state);
   if (!mission) return { done: 0, total: 0, label: '' };
   const done = Math.min(state.missions.stage, mission.stages.length);
@@ -627,7 +627,7 @@ function speakStage(hooks, state, stage) {
   }
 }
 
-export function startMission(state, id, hooks) {
+function startMission(state, id, hooks) {
   ensureMissionState(state);
   const mission = missionById(id);
   if (!mission) return { ok: false, reason: 'no-such-mission' };
@@ -661,7 +661,7 @@ function finishStage(state, hooks) {
   return { ok: true, advanced: true, stage: next };
 }
 
-export function completeMission(state, hooks) {
+function completeMission(state, hooks) {
   const mission = currentMission(state);
   if (!mission) return { ok: false, reason: 'no-active-mission' };
   state.missions.completed.push(mission.id);
@@ -687,7 +687,7 @@ export function completeMission(state, hooks) {
 // asks the matching hook whether its condition is met, and does nothing
 // when the hook is absent or says no. The caller picks the reporter that
 // matches what just happened in the world.
-export function reportArrival(state, hooks) {
+function reportArrival(state, hooks) {
   const stage = currentStage(state);
   if (!stage) return { ok: false, reason: 'no-active-stage' };
   if (stage.type !== 'drive-to' && stage.type !== 'escort' && stage.type !== 'pickup') {
@@ -698,7 +698,7 @@ export function reportArrival(state, hooks) {
   return finishStage(state, hooks);
 }
 
-export function reportCombat(state, hooks) {
+function reportCombat(state, hooks) {
   const stage = currentStage(state);
   if (!stage) return { ok: false, reason: 'no-active-stage' };
   if (stage.type !== 'shoot') return { ok: false, reason: 'wrong-stage-type' };
@@ -707,7 +707,7 @@ export function reportCombat(state, hooks) {
   return finishStage(state, hooks);
 }
 
-export function reportRace(state, hooks, won) {
+function reportRace(state, hooks, won) {
   const stage = currentStage(state);
   if (!stage) return { ok: false, reason: 'no-active-stage' };
   if (stage.type !== 'race') return { ok: false, reason: 'wrong-stage-type' };
@@ -720,7 +720,7 @@ export function reportRace(state, hooks, won) {
   return finishStage(state, hooks);
 }
 
-export function reportDelivery(state, hooks) {
+function reportDelivery(state, hooks) {
   const stage = currentStage(state);
   if (!stage) return { ok: false, reason: 'no-active-stage' };
   if (stage.type !== 'deliver') return { ok: false, reason: 'wrong-stage-type' };
@@ -729,7 +729,7 @@ export function reportDelivery(state, hooks) {
   return finishStage(state, hooks);
 }
 
-export function failMission(state, reason, hooks) {
+function failMission(state, reason, hooks) {
   const mission = currentMission(state);
   if (!mission) return { ok: false, reason: 'no-active-mission' };
   const failed = { id: mission.id, name: mission.name, stage: state.missions.stage, reason: reason || 'failed' };
@@ -739,14 +739,14 @@ export function failMission(state, reason, hooks) {
   return { ok: true, failed: true, mission: failed };
 }
 
-export function retryMission(state, hooks) {
+function retryMission(state, hooks) {
   // Retry simply re-opens the failed mission from its first stage.
   // The last failed id is kept on the caller side; here we restart
   // whatever mission the HUD hands back by id.
   return state;
 }
 
-export function restartMission(state, id, hooks) {
+function restartMission(state, id, hooks) {
   ensureMissionState(state);
   if (state.missions.current) return { ok: false, reason: 'mission-in-progress' };
   const mission = missionById(id);
@@ -754,7 +754,7 @@ export function restartMission(state, id, hooks) {
   return startMission(state, id, hooks);
 }
 
-export function abandonMission(state, hooks) {
+function abandonMission(state, hooks) {
   const mission = currentMission(state);
   if (!mission) return { ok: false, reason: 'no-active-mission' };
   state.missions.current = null;
@@ -763,7 +763,7 @@ export function abandonMission(state, hooks) {
   return { ok: true, abandoned: mission.name };
 }
 
-export function missionSummary(state) {
+function missionSummary(state) {
   ensureMissionState(state);
   return {
     completed: state.missions.completed.length,
@@ -777,6 +777,22 @@ export function missionSummary(state) {
 
 // A tiny factory for a fresh missions block, so a new game (or a test)
 // never inherits another run's progress by accident.
-export function freshMissions() {
+function freshMissions() {
   return { current: null, stage: 0, completed: [] };
 }
+
+// Classic-script export: the browser loads this file with a plain
+// <script> tag, so the public API is published on window.
+window.PalmaMissions = {
+  STAGE_TYPES: STAGE_TYPES, DISTRICTS: DISTRICTS, MISSIONS: MISSIONS,
+  missionById: missionById, missionList: missionList,
+  ensureMissionState: ensureMissionState, isMissionUnlocked: isMissionUnlocked,
+  currentMission: currentMission, currentStage: currentStage,
+  stageProgress: stageProgress, startMission: startMission,
+  completeMission: completeMission, reportArrival: reportArrival,
+  reportCombat: reportCombat, reportRace: reportRace,
+  reportDelivery: reportDelivery, failMission: failMission,
+  retryMission: retryMission, restartMission: restartMission,
+  abandonMission: abandonMission, missionSummary: missionSummary,
+  freshMissions: freshMissions,
+};

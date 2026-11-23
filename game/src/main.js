@@ -144,9 +144,22 @@
       keys[k] = true;
       if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].indexOf(k) >= 0) e.preventDefault();
       if (k === 'enter' && state.screen === 'title') state.screen = 'playing';
+      if (state.screen === 'title' && (k === 'arrowleft' || k === 'arrowright')) {
+        state.titleSlot = ((state.titleSlot || 0) + (k === 'arrowright' ? 1 : 2)) % 3;
+      }
       if (k === 'escape' || k === 'p') {
         if (state.screen === 'playing') state.screen = 'paused';
         else if (state.screen === 'paused') state.screen = 'playing';
+      }
+      // Pause-menu keys: 1-6 switch the PalmaScreens tab, M drops a
+      // waypoint on the current mission marker.
+      if (state.screen === 'paused' && window.PalmaScreens) {
+        var tabs = window.PalmaScreens.TABS;
+        var n = parseInt(k, 10);
+        if (n >= 1 && n <= tabs.length) state.pauseTab = tabs[n - 1].id;
+        if (k === 'm' && state.missionTarget) {
+          state.waypoint = { x: state.missionTarget.x, y: state.missionTarget.y, label: 'Mission' };
+        }
       }
       if (k === 'e' && state.screen === 'playing') {
         if (state.player.vehicle) window.PalmaPlayer.exitVehicle(state, city);
@@ -244,8 +257,14 @@
       var mode = renderer.render(state, city, state.cam, state.time);
       if (window.PalmaHud) window.PalmaHud.draw(state, city, canvas, mode, renderer);
       else drawHud(state, mode);
-      if (state.screen === 'title') drawTitle(state);
-      if (state.screen === 'paused') drawPaused(state);
+      if (state.screen === 'title') {
+        if (window.PalmaScreens) window.PalmaScreens.drawTitle(canvas.getContext('2d'), state, city, canvas);
+        else drawTitle(state);
+      }
+      if (state.screen === 'paused') {
+        if (window.PalmaScreens) window.PalmaScreens.drawPause(canvas.getContext('2d'), state, city, canvas, state.pauseTab || 'map');
+        else drawPaused(state);
+      }
       requestAnimationFrame(step);
     }
 
