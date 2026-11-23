@@ -186,4 +186,166 @@
     modelById: modelById, pickModel: pickModel,
     CAR_LEN: CAR_LEN, CAR_WID: CAR_WID
   };
+
+  // ---- The Gull: Rey's flyable air-taxi heli ----
+  //
+  // A heli is plain data like a car, plus height and a spinning rotor:
+  // { kind, name, x, y, angle, altitude, speed, climb, rotor, damage,
+  // driver, landed, color }. Altitude is metres; one metre reads as
+  // four world units, so a rooftop of height h units sits at h / 4
+  // metres. Flying the Gull never raises wanted on its own — it is an
+  // air-taxi, and the rooftop pickup in mission five relies on Rey
+  // being able to come and go without the PVPD noticing. The loop
+  // hands the city in through state.city and the keys through
+  // state.heliInput ({ throttle, steer, climb, brake }) each frame.
+
+  var GULL_UNITS_PER_M = 4;
+  var GULL_TOP_SPEED = 120;   // world units per second, forward
+  var GULL_BACK_SPEED = 30;   // world units per second, reverse
+  var GULL_CLIMB_UP = 6;      // metres per second
+  var GULL_CLIMB_DOWN = 5;    // metres per second
+  var GULL_MAX_ALT = 120;     // metres
+  var GULL_HOVER_FLOOR = 1.5; // metres: below this, palms and kerbs matter
+
+  // Parked on the sand by the pier by default; the staging builder can
+  // pass x/y/angle to put her somewhere exact for a shot.
+  function spawnGull(city, opts) {
+    var o = opts || {};
+    var pad = WORLD.findSpawn(city, 'pier');
+    return {
+      kind: 'heli', name: 'Gull',
+      x: o.x !== undefined ? o.x : pad.x + 90,
+      y: o.y !== undefined ? o.y : pad.y + 20,
+      angle: o.angle !== undefined ? o.angle : -Math.PI / 2,
+      altitude: 0, speed: 0, climb: 0, rotor: 0, rotorSpeed: 0,
+      damage: 0, driver: null, landed: true,
+      color: '#ffd166'
+    };
+  }
+
+  // Flat deck under a point, in metres: a rooftop when the point is
+  // over a building, open ground (or pier sand) everywhere else.
+  function deckHeight(city, x, y) {
+    var halls = city.buildings;
+    for (var i = 0; i < halls.length; i++) {
+      var b = halls[i];
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.d) {
+        return b.h / GULL_UNITS_PER_M;
+      }
+    }
+    return 0;
+  }
+
+  // True when the Gull cannot sit at (x, y) at this altitude: inside a
+  // building taller than she is high, or brushing something solid near
+  // the ground (a palm trunk, the wheel base, the map edge, the water).
+  function gullBlocked(city, x, y, altitude) {
+    var halls = city.buildings;
+    for (var i = 0; i < halls.length; i++) {
+      var b = halls[i];
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.d) {
+        if (altitude * GULL_UNITS_PER_M < b.h) return true;
+      }
+    }
+    if (altitude < GULL_HOVER_FLOOR && WORLD.isSolid(city, x, y)) return true;
+    if (x < 8 || x > CFG.CITY.width - 8 || y < 8 || y > CFG.CITY.height - 8) return true;
+    return false;
+  }
+
+  // Altitude readout for the HUD, in whole metres.
+  function gullAltitude(heli) {
+    if (!heli) return 0;
+    return Math.round(heli.altitude || 0);
+  }
+
+  // Fly the Gull one tick. dt is seconds. Returns an event bag for
+  // shake and sound: { crashed, scraped, landed, liftedOff }.
+  function updateHeli(state, dt) {
+    var events = { crashed: false, scraped: false, landed: false, liftedOff: false };
+    var heli = state.player ? state.player.vehicle : null;
+    if (!heli || heli.kind !== 'heli') return events;
+    var city = state.city || null;
+    var input = state.heliInput || {};
+    var throttle = input.throttle || 0;
+    var steer = input.steer || 0;
+    var climbIn = input.climb || 0;
+
+    // Rotor spools up in the air and idles on the deck.
+    var spinTarget = heli.landed ? 3 : 16;
+    heli.rotorSpeed += (spinTarget - heli.rotorSpeed) * Math.min(1, 1.5 * dt);
+    heli.rotor += heli.rotorSpeed * dt;
+
+    // Vertical: climb input lifts off the deck; no input holds a hover.
+    if (heli.landed) {
+      heli.climb = 0;
+      if (climbIn > 0) {
+        heli.landed = false;
+        heli.climb = GULL_CLIMB_UP * climbIn;
+        events.liftedOff = true;
+      }
+    } else {
+      var climbTarget = 0;
+      if (climbIn > 0) climbTarget = GULL_CLIMB_UP * climbIn;
+      else if (climbIn < 0) climbTarget = GULL_CLIMB_DOWN * climbIn;
+      heli.climb += (climbTarget - heli.climb) * Math.min(1, 2.5 * dt);
+      heli.altitude += heli.climb * dt;
+      if (heli.altitude > GULL_MAX_ALT) {
+        heli.altitude = GULL_MAX_ALT;
+        if (heli.climb > 0) heli.climb = 0;
+      }
+      if (heli.altitude < 0) { heli.altitude = 0; heli.climb = 0; }
+      // Touching down: the deck under the skids decides the landing.
+      var deck = city ? deckHeight(city, heli.x, heli.y) : 0;
+      if (heli.climb <= 0 && heli.altitude <= deck) {
+        heli.altitude = deck;
+        heli.climb = 0;
+        heli.landed = true;
+        events.landed = true;
+      }
+    }
+
+    // Forward speed eases toward what the throttle asks; the air brake
+    // kills it fast. A landed Gull does not taxi.
+    if (heli.landed) {
+      heli.speed = 0;
+    } else {
+      var want = 0;
+      if (throttle > 0) want = throttle * GULL_TOP_SPEED;
+      else if (throttle < 0) want = throttle * GULL_BACK_SPEED;
+      var ease = throttle !== 0 ? 1.4 : 0.8;
+      heli.speed += (want - heli.speed) * Math.min(1, ease * dt);
+      if (input.brake) heli.speed -= heli.speed * Math.min(1, 3 * dt);
+      // Yaw: she turns even at a hover, quicker with forward speed.
+      var yaw = steer * (0.9 + Math.min(1, Math.abs(heli.speed) / GULL_TOP_SPEED) * 1.1);
+      heli.angle += yaw * dt;
+    }
+
+    // Step forward, one axis at a time, so a wall scrape slides instead
+    // of sticking. A hard hit bends the airframe and stops her.
+    if (!heli.landed && city) {
+      var nx = heli.x + Math.cos(heli.angle) * heli.speed * dt;
+      var ny = heli.y + Math.sin(heli.angle) * heli.speed * dt;
+      var bumped = false;
+      if (!gullBlocked(city, nx, heli.y, heli.altitude)) heli.x = nx;
+      else bumped = true;
+      if (!gullBlocked(city, heli.x, ny, heli.altitude)) heli.y = ny;
+      else bumped = true;
+      if (bumped) {
+        var hit = Math.abs(heli.speed);
+        if (hit > 25) {
+          heli.damage = Math.min(100, heli.damage + hit * 0.15);
+          events.crashed = true;
+        } else if (hit > 6) {
+          events.scraped = true;
+        }
+        heli.speed *= 0.3;
+      }
+    }
+    return events;
+  }
+
+  window.PalmaVehicles.spawnGull = spawnGull;
+  window.PalmaVehicles.updateHeli = updateHeli;
+  window.PalmaVehicles.gullAltitude = gullAltitude;
+  window.PalmaVehicles.deckHeight = deckHeight;
 })();

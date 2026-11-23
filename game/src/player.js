@@ -210,4 +210,65 @@
     followCamera: followCamera, giveAmmo: giveAmmo,
     weaponDef: weaponDef, WALK_SPEED: WALK_SPEED, RUN_SPEED: RUN_SPEED
   };
+
+  // ---- The Gull: climbing in and out ----
+  //
+  // The E key is shared with cars; the loop decides which one Rey is
+  // near and calls the matching pair. Boarding the Gull never raises
+  // wanted: she is an air-taxi, and mission five's rooftop pickup
+  // depends on Rey being able to come and go without the PVPD
+  // noticing. Stepping out only works once she is down — on the ground
+  // or on a roof — never in mid-air.
+
+  var HELI_BOARD_R = 90; // how close Rey must stand to climb in
+
+  function enterHeli(state, heli) {
+    var p = state.player;
+    if (p.vehicle) return null;
+    var g = heli || state.gull || null;
+    if (!g) return null;
+    var dx = g.x - p.x, dy = g.y - p.y;
+    if (dx * dx + dy * dy > HELI_BOARD_R * HELI_BOARD_R) return null;
+    p.vehicle = g;
+    g.driver = 'player';
+    p.x = g.x; p.y = g.y;
+    p.angle = g.angle;
+    return g;
+  }
+
+  // First walkable square around (x, y): rings widen spoke by spoke,
+  // so stepping off a rooftop lands Rey past the parapet, on the
+  // street below, instead of inside the building footprint.
+  function stepOffSpot(city, x, y) {
+    var rings = [36, 80, 150, 260];
+    var spokes = 12;
+    for (var r = 0; r < rings.length; r++) {
+      for (var s = 0; s < spokes; s++) {
+        var a = (s / spokes) * Math.PI * 2;
+        var px = x + Math.cos(a) * rings[r];
+        var py = y + Math.sin(a) * rings[r];
+        if (!WORLD.isSolid(city, px, py)) return { x: px, y: py };
+      }
+    }
+    return null;
+  }
+
+  function exitHeli(state) {
+    var p = state.player;
+    var g = p.vehicle;
+    if (!g || g.kind !== 'heli') return null;
+    if (!g.landed) return null; // still in the air — set her down first
+    var city = state.city || null;
+    var spot = city ? stepOffSpot(city, g.x, g.y) : null;
+    if (spot) { p.x = spot.x; p.y = spot.y; }
+    else { p.x = g.x + 40; p.y = g.y; }
+    p.vehicle = null;
+    g.driver = null;
+    g.speed = 0;
+    g.climb = 0;
+    return g;
+  }
+
+  window.PalmaPlayer.enterHeli = enterHeli;
+  window.PalmaPlayer.exitHeli = exitHeli;
 })();
