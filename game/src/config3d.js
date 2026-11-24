@@ -108,32 +108,36 @@ export const CFG3D = {
   // never near-black: the player must always read the street.
   GRADES: {
     morning: {
-      label: 'Morning', skyTop: '#3f7fd0', skyHorizon: '#cfe4f2',
+      label: 'Morning', skyTop: '#3f7fd0', skyHorizon: '#cfe4f2', skyMid: '#79aede',
       sunColor: '#fff1cf', sunIntensity: 2.4, sunElevation: 32, sunAzimuth: 95,
       hemiSky: '#bcd6ea', hemiGround: '#6b7a5e', hemiIntensity: 0.75,
-      fogColor: '#c3d8e6', fogNear: 900, fogFar: 5200,
+      fogColor: '#c3d8e6', fogNear: 400, fogFar: 2500,
       stars: 0, windowGlow: 0.12, neonGlow: 0.25, cloudTint: '#ffffff',
+      exposure: 1.10,
     },
     noon: {
-      label: 'Midday', skyTop: '#2f6fd0', skyHorizon: '#a8d0ea',
+      label: 'Midday', skyTop: '#2f6fd0', skyHorizon: '#a8d0ea', skyMid: '#6ea7dc',
       sunColor: '#fff8e2', sunIntensity: 3.0, sunElevation: 74, sunAzimuth: 180,
       hemiSky: '#cfe4f2', hemiGround: '#7a8a6a', hemiIntensity: 0.9,
-      fogColor: '#b8d2e4', fogNear: 1100, fogFar: 6000,
+      fogColor: '#b8d2e4', fogNear: 400, fogFar: 2500,
       stars: 0, windowGlow: 0.05, neonGlow: 0.15, cloudTint: '#ffffff',
+      exposure: 1.05,
     },
     afternoon: {
-      label: 'Afternoon', skyTop: '#35608f', skyHorizon: '#f2c98a',
+      label: 'Afternoon', skyTop: '#35608f', skyHorizon: '#f2c98a', skyMid: '#d99a5e',
       sunColor: '#ffc978', sunIntensity: 2.2, sunElevation: 24, sunAzimuth: 265,
       hemiSky: '#d8c49a', hemiGround: '#5e5a4a', hemiIntensity: 0.6,
-      fogColor: '#d8bd8e', fogNear: 800, fogFar: 4800,
+      fogColor: '#d8bd8e', fogNear: 400, fogFar: 2500,
       stars: 0, windowGlow: 0.25, neonGlow: 0.5, cloudTint: '#ffe8c8',
+      exposure: 1.15,
     },
     night: {
-      label: 'Night', skyTop: '#0a1230', skyHorizon: '#1d2f55',
+      label: 'Night', skyTop: '#0a1230', skyHorizon: '#1d2f55', skyMid: '#1a2c50',
       sunColor: '#8fa8d8', sunIntensity: 0.55, sunElevation: 38, sunAzimuth: 300,
       hemiSky: '#22345e', hemiGround: '#11141c', hemiIntensity: 0.4,
-      fogColor: '#16233f', fogNear: 500, fogFar: 3400,
+      fogColor: '#16233f', fogNear: 250, fogFar: 1800,
       stars: 1, windowGlow: 1.0, neonGlow: 1.0, cloudTint: '#5a6a8a',
+      exposure: 0.90,
     },
   },
 
@@ -153,7 +157,27 @@ export const CFG3D = {
     SHADOW_FOLLOW_DIST: 1200,  // sun light rides this far out along the sun ray
     SHADOW_SNAP: 8,            // snap the follow focus to this grid (m) — no shimmer
     SHADOW_DEFAULT_FOCUS: { x: -800, z: 600 }, // player spawn (title screen)
-    DPR_LEVELS: [2, 1.5, 1.25, 1],
+    SHADOW_NORMAL_BIAS: 0.03, // r9 A4: kills acne on rounded geometry; shadow.radius is ignored under PCFSoft in r160 — do NOT use it, do NOT switch to VSM
+    DPR_LEVELS: [2, 1.5, 1.25], // r9 A2: floor is 1.25, never 1 — DPR 1 at 1280x720 is visibly pixelated
+    DPR_MIN: 1.25,              // live-play floor (governor never steps below this)
+    DPR_SHOT: 2,               // setupShotMode / official screenshots force this
+    // A1 anisotropy: main3d.js overwrites this at boot with
+    // renderer.capabilities.getMaxAnisotropy() (typically 8-16)
+    // BEFORE buildWorld runs, so world3d.js / trafficlights3d.js can
+    // read it as CFG3D.PERF.maxAnisotropy instead of hardcoding 4.
+    // Default 4 is the pre-r9 behaviour, for Node/test contexts with
+    // no renderer. sky3d.js textures read the same value.
+    maxAnisotropy: 4,
+    // C1 env-map defaults (r9): per-material envMapIntensity base
+    // values, applied by sky3d.js (first setTimeOfDay call traverses
+    // the scene; the night dimming pass re-uses the stored base).
+    // Rule: metalness >= 0.3 (car paint, glass, chrome) -> 1.0,
+    // everything else (buildings, ground, trim) -> 0.3, so the env
+    // map never washes the city to pastel. vehicles3d.js should set
+    // envMapIntensity 1.0 explicitly on paint()/glass() materials.
+    ENV_INTENSITY_PAINT: 1.0,  // car paint / glass / chrome base
+    ENV_INTENSITY_WORLD: 0.3,  // buildings / ground / trim base
+    ENV_NIGHT_DIM: 0.45,       // env intensity scaled by (1 - 0.45 * nightness)
     DPR_DROP_MS: 20,           // step down if EMA frame time exceeds this…
     DPR_DROP_HOLD_S: 2,        // …sustained this long
     DPR_RECOVER_MS: 13,        // step back up if EMA frame time is under this…

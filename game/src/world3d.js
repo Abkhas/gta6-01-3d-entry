@@ -26,7 +26,10 @@ function canvasTexture(w, h, painter) {
   painter(c.getContext('2d'), w, h);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
+  // R9 A1: device max, not a hardcoded 4 — main3d.js overwrites
+  // CFG3D.PERF.maxAnisotropy at boot from the renderer's capabilities
+  // (typically 8–16); default 4 is the pre-r9 / Node behaviour.
+  tex.anisotropy = CFG3D.PERF.maxAnisotropy || 4;
   return tex;
 }
 
@@ -105,6 +108,22 @@ function facadeTextures(wall, trim, litShare, rng, type, rngB) {
       for (let r = 0; r <= rows; r++) g.fillRect(0, r * rh, w, 3);
     }
     g.fillStyle = trim; g.fillRect(0, 0, w, 6); g.fillRect(0, h - 6, w, 6);
+    // R9 B6: per-floor colour jitter (±4% lightness, deterministic
+    // from the row index — no extra RNG draws, so the city layout is
+    // untouched) + a grime gradient at the ground floor (canvas
+    // bottom = wall base; the emissive canvas is a separate painter,
+    // so lit windows are unaffected).
+    for (let r = 0; r < rows; r++) {
+      const j = ((((r * 2654435761) ^ (cols * 40503)) >>> 0) % 9) - 4;
+      if (j !== 0) {
+        g.fillStyle = j > 0 ? `rgba(255,255,255,${j * 0.01})` : `rgba(0,0,0,${-j * 0.01})`;
+        g.fillRect(0, r * rh, w, rh);
+      }
+    }
+    const grime = g.createLinearGradient(0, h - 44, 0, h);
+    grime.addColorStop(0, 'rgba(0,0,0,0)');
+    grime.addColorStop(1, 'rgba(0,0,0,0.26)');
+    g.fillStyle = grime; g.fillRect(0, h - 44, w, 44);
     for (const [c, r, lit, litColor] of wins) {
       if (type === 'glass') {
         if (lit) {
@@ -142,6 +161,23 @@ function facadeTextures(wall, trim, litShare, rng, type, rngB) {
       }
       g.fillStyle = lit ? litColor : '#2c3a4a';
       g.fillRect(c * cw + cw * 0.2, r * rh + rh * 0.22, cw * 0.6, rh * 0.56);
+    }
+    // R9 B6: window frames + sills over the flat window rects
+    // (concrete + brick faces; glass/ribbon/balcony/punched already
+    // carry their own mullions/reveals). Frame = 2 px dark ring,
+    // sill = 2 px light strip under the window. Same rects, same
+    // repeat/UVs — the atlas mapping is unchanged.
+    if (type === 'concrete' || type === 'brick' || type === undefined) {
+      for (const [c, r] of wins) {
+        const wx = c * cw + cw * 0.2, wy = r * rh + rh * 0.22, ww = cw * 0.6, wh = rh * 0.56;
+        g.fillStyle = 'rgba(0,0,0,0.45)';
+        g.fillRect(wx - 2, wy - 2, ww + 4, 2);
+        g.fillRect(wx - 2, wy + wh, ww + 4, 2);
+        g.fillRect(wx - 2, wy, 2, wh);
+        g.fillRect(wx + ww, wy, 2, wh);
+        g.fillStyle = 'rgba(220,215,200,0.85)';
+        g.fillRect(wx - 2, wy + wh + 2, ww + 4, 2);
+      }
     }
   });
   const emissive = canvasTexture(128, 256, (g, w, h) => {
@@ -181,6 +217,121 @@ function plankTexture() {
   });
 }
 
+// R9 C3: procedural asphalt. One tile = 4 m long x one road-width
+// (14 m) wide; the map is painted at the true asphalt tones and the
+// material colour stays white, so the texture modulates the base
+// colour instead of doubling it. Speckle is drawn with wrap-around
+// duplicates so the tile is periodic and never shows a seam; a few
+// darker patches break up the field, and faint tyre-polish bands sit
+// in the wheel paths (two lanes, wheels ±0.9 m off each lane centre).
+// `vertical` paints the bands across U instead of V, because an
+// east-west strip maps U along its length while a north-south strip
+// maps U across its width — each orientation needs its own texture.
+// The matching roughness canvas is light grey (rough) with darker
+// (smoother, polished) wheel bands, so albedo and roughness stay
+// correlated instead of uniformly shiny.
+function asphaltTexture(vertical) {
+  const W = vertical ? 512 : 128, H = vertical ? 128 : 512;
+  const rngA = mulberry32(20261124 ^ 0xa53a);
+  const map = canvasTexture(W, H, (g, w, h) => {
+    g.fillStyle = '#45484f'; g.fillRect(0, 0, w, h);
+    const dots = ['#3a3d44', '#52565e', '#5d616a', '#2f3238', '#4a4e55'];
+    for (let i = 0; i < 5200; i++) {
+      const x = rngA() * w, y = rngA() * h, s = rngA() < 0.7 ? 1 : 2;
+      g.fillStyle = dots[Math.floor(rngA() * dots.length)];
+      // Wrap-around duplicates: the speckle tiles seamlessly.
+      for (const dx of [-w, 0, w]) for (const dy of [-h, 0, h]) g.fillRect(x + dx, y + dy, s, s);
+    }
+    for (let i = 0; i < 22; i++) {
+      const x = rngA() * w, y = rngA() * h, r = 18 + rngA() * 42;
+      const grd = g.createRadialGradient(x, y, 2, x, y, r);
+      grd.addColorStop(0, `rgba(0,0,0,${0.05 + rngA() * 0.09})`);
+      grd.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = grd;
+      g.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    // Wheel paths: lane centres ±3.5 m off the road centreline.
+    const across = vertical ? w : h;
+    for (const off of [-3.5, 3.5]) for (const wy of [-0.9, 0.9]) {
+      const p = across / 2 + ((off + wy) / 14) * across;
+      g.fillStyle = 'rgba(0,0,0,0.10)';
+      if (vertical) g.fillRect(p - 5, 0, 10, h);
+      else g.fillRect(0, p - 5, w, 10);
+    }
+  });
+  const rough = canvasTexture(W, H, (g, w, h) => {
+    g.fillStyle = '#e6e6e6'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 2600; i++) {
+      g.fillStyle = rngA() < 0.5 ? '#d4d4d4' : '#f2f2f2';
+      g.fillRect(rngA() * w, rngA() * h, 2, 2);
+    }
+    const across = vertical ? w : h;
+    for (const off of [-3.5, 3.5]) for (const wy of [-0.9, 0.9]) {
+      const p = across / 2 + ((off + wy) / 14) * across;
+      g.fillStyle = 'rgba(154,154,154,0.6)';
+      if (vertical) g.fillRect(p - 5, 0, 10, h);
+      else g.fillRect(0, p - 5, w, 10);
+    }
+  });
+  return { map, rough };
+}
+
+// R9 C3: paving slabs for the sidewalks — one 2 m square tile (light
+// grey + darker joints on all four edges, so it tiles seamlessly in
+// either strip orientation) with a matching roughness canvas.
+function pavingTexture() {
+  const rngP = mulberry32(20261124 ^ 0x9a19);
+  const map = canvasTexture(256, 256, (g, w, h) => {
+    g.fillStyle = '#a9adb3'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 1400; i++) {
+      g.fillStyle = rngP() < 0.5 ? '#9ba0a7' : '#b7bbc1';
+      g.fillRect(rngP() * w, rngP() * h, 2, 2);
+    }
+    g.fillStyle = 'rgba(0,0,0,0.35)';
+    g.fillRect(0, 0, w, 3); g.fillRect(0, h - 3, w, 3);
+    g.fillRect(0, 0, 3, h); g.fillRect(w - 3, 0, 3, h);
+  });
+  const rough = canvasTexture(256, 256, (g, w, h) => {
+    g.fillStyle = '#e8e8e8'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 900; i++) {
+      g.fillStyle = rngP() < 0.5 ? '#d8d8d8' : '#f2f2f2';
+      g.fillRect(rngP() * w, rngP() * h, 2, 2);
+    }
+  });
+  return { map, rough };
+}
+
+// R9 B1: local rounded box. RoundedBoxGeometry is NOT vendored
+// (game/vendor holds only the core three module, no three/addons
+// import-map entry), so build the same shape from core
+// ExtrudeGeometry: a rounded-rect footprint extruded with a bevel.
+// Same technique as the ped rounded boxes in people3d.js, written
+// fresh here for the world builder. Built at real size — never a
+// non-uniformly scaled unit box, so the bevel radius stays exact on
+// every axis. Total size is w x h x d; the effective corner radius
+// is r (half in the shape, half in the bevel); bevelSegments 2.
+function roundedBoxGeometry(w, h, d, r) {
+  const b = r / 2;
+  const s = new THREE.Shape();
+  const x0 = -(w - r) / 2, y0 = -(d - r) / 2, ww = w - r, dd = d - r;
+  s.moveTo(x0 + b, y0);
+  s.lineTo(x0 + ww - b, y0);
+  s.absarc(x0 + ww - b, y0 + b, b, -Math.PI / 2, 0, false);
+  s.lineTo(x0 + ww, y0 + dd - b);
+  s.absarc(x0 + ww - b, y0 + dd - b, b, 0, Math.PI / 2, false);
+  s.lineTo(x0 + b, y0 + dd);
+  s.absarc(x0 + b, y0 + dd - b, b, Math.PI / 2, Math.PI, false);
+  s.lineTo(x0, y0 + b);
+  s.absarc(x0 + b, y0 + b, b, Math.PI, Math.PI * 1.5, false);
+  const geo = new THREE.ExtrudeGeometry(s, {
+    depth: h - r, bevelEnabled: true, bevelThickness: b, bevelSize: b,
+    bevelSegments: 2, curveSegments: 6, steps: 1,
+  });
+  geo.rotateX(-Math.PI / 2); // extrusion (+z) becomes +y (up)
+  geo.translate(0, b - h / 2, 0); // centre vertically: spans -h/2..h/2
+  return geo;
+}
+
 // ---- world ------------------------------------------------------------
 
 export function buildWorld(scene, CFG = CFG3D) {
@@ -211,7 +362,29 @@ export function buildWorld(scene, CFG = CFG3D) {
 
   for (let c = -HALF; c <= HALF; c += BLOCK) roadCentres.push(c);
 
-  const mat = (color, opts = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.0, ...opts });
+  // R9 C2: per-surface roughness/metalness — the old single 0.9/0.0
+  // default made every surface the same matte plastic. `kind` picks
+  // a table row; explicit opts still win. (envMapIntensity is NOT set
+  // here: sky3d.js applyEnvMapIntensity derives it from metalness —
+  // >= 0.3 gets 1.0, everything else 0.3 — so glass/chrome pick up
+  // the env map and buildings stay low automatically.)
+  const SURF = {
+    asphalt: { roughness: 0.95, metalness: 0.0 },
+    concrete: { roughness: 0.9, metalness: 0.0 },
+    pavement: { roughness: 0.95, metalness: 0.0 },
+    wall: { roughness: 0.8, metalness: 0.0 },
+    glass: { roughness: 0.1, metalness: 0.4 },
+    chrome: { roughness: 0.15, metalness: 1.0 },
+    rubber: { roughness: 1.0, metalness: 0.0 },
+    sand: { roughness: 1.0, metalness: 0.0 },
+  };
+  const mat = (color, opts = {}) => {
+    const { kind, ...rest } = opts;
+    return new THREE.MeshStandardMaterial({
+      color, roughness: 0.9, metalness: 0.0,
+      ...(kind ? SURF[kind] : {}), ...rest,
+    });
+  };
 
   function box(w, h, d, material, x, y, z, parent = group) {
     const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material);
@@ -265,9 +438,31 @@ export function buildWorld(scene, CFG = CFG3D) {
   // order is deterministic even at long range where depth precision
   // is thin: roads pushed back, sidewalks forward, highways between,
   // dashes always on top.
-  const roadMat = mat('#4a4e56', { roughness: 0.95, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
-  const walkMat = mat('#9ba1a8', { roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
-  const hwMat = mat('#3d4048', { roughness: 0.95, polygonOffset: true, polygonOffsetFactor: 0, polygonOffsetUnits: -1 });
+  // R9 C3: the asphalt + paving textures, tiled by metres. An
+  // east-west strip maps U along its length, a north-south strip
+  // maps U across its width, so each orientation needs its own
+  // texture + repeat (the tile is 4 m long, one road-width wide).
+  // The paving tile is a 2 m square, so the same painter feeds both
+  // orientations with different repeats. Highways keep the flat
+  // mat — their 30 m width would put the wheel bands in the wrong
+  // lanes. Lane markings stay as separate geometry, untouched.
+  const asphaltEW = asphaltTexture(false);
+  asphaltEW.map.repeat.set(HALF * 2 / 4, 1);
+  asphaltEW.rough.repeat.set(HALF * 2 / 4, 1);
+  const asphaltNS = asphaltTexture(true);
+  asphaltNS.map.repeat.set(1, HALF * 2 / 4);
+  asphaltNS.rough.repeat.set(1, HALF * 2 / 4);
+  const pavingEW = pavingTexture();
+  pavingEW.map.repeat.set(HALF * 2 / 2, 2);
+  pavingEW.rough.repeat.set(HALF * 2 / 2, 2);
+  const pavingNS = pavingTexture();
+  pavingNS.map.repeat.set(2, HALF * 2 / 2);
+  pavingNS.rough.repeat.set(2, HALF * 2 / 2);
+  const roadMatEW = mat('#ffffff', { kind: 'asphalt', map: asphaltEW.map, roughnessMap: asphaltEW.rough, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+  const roadMatNS = mat('#ffffff', { kind: 'asphalt', map: asphaltNS.map, roughnessMap: asphaltNS.rough, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
+  const walkMatEW = mat('#ffffff', { kind: 'pavement', map: pavingEW.map, roughnessMap: pavingEW.rough, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
+  const walkMatNS = mat('#ffffff', { kind: 'pavement', map: pavingNS.map, roughnessMap: pavingNS.rough, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
+  const hwMat = mat('#3d4048', { kind: 'asphalt', polygonOffset: true, polygonOffsetFactor: 0, polygonOffsetUnits: -1 });
 
   function roadStrip(x, z, w, d, material, y = 0.02) {
     const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), material);
@@ -281,14 +476,14 @@ export function buildWorld(scene, CFG = CFG3D) {
   for (const c of roadCentres) {
     // East-west streets (vary z) and north-south streets (vary x).
     if (c !== HW_N) {
-      roadStrip(0, c, HALF * 2, ROAD_W, roadMat, 0.02);
-      roadStrip(0, c - ROAD_W / 2 - 2, HALF * 2, 4, walkMat, 0.05);
-      roadStrip(0, c + ROAD_W / 2 + 2, HALF * 2, 4, walkMat, 0.05);
+      roadStrip(0, c, HALF * 2, ROAD_W, roadMatEW, 0.02);
+      roadStrip(0, c - ROAD_W / 2 - 2, HALF * 2, 4, walkMatEW, 0.05);
+      roadStrip(0, c + ROAD_W / 2 + 2, HALF * 2, 4, walkMatEW, 0.05);
     }
     if (c !== HW_E) {
-      roadStrip(c, 0, ROAD_W, HALF * 2, roadMat, 0.02);
-      roadStrip(c - ROAD_W / 2 - 2, 0, 4, HALF * 2, walkMat, 0.05);
-      roadStrip(c + ROAD_W / 2 + 2, 0, 4, HALF * 2, walkMat, 0.05);
+      roadStrip(c, 0, ROAD_W, HALF * 2, roadMatNS, 0.02);
+      roadStrip(c - ROAD_W / 2 - 2, 0, 4, HALF * 2, walkMatNS, 0.05);
+      roadStrip(c + ROAD_W / 2 + 2, 0, 4, HALF * 2, walkMatNS, 0.05);
     }
   }
   // Highways: wider, fenced, no cross streets.
@@ -299,10 +494,10 @@ export function buildWorld(scene, CFG = CFG3D) {
   // chase shot read as driving on grass. Give it a real strip, kerbs and
   // centre dashes (added to dashSpots below).
   const BEACH_ROAD_X = CFG.BEACH_X - 30;
-  roadStrip(BEACH_ROAD_X, 0, ROAD_W, HALF * 2, roadMat, 0.02);
-  roadStrip(BEACH_ROAD_X - ROAD_W / 2 - 2, 0, 4, HALF * 2, walkMat, 0.05);
-  roadStrip(BEACH_ROAD_X + ROAD_W / 2 + 2, 0, 4, HALF * 2, walkMat, 0.05);
-  const barrierMat = mat('#8a8f94', { roughness: 0.8 });
+  roadStrip(BEACH_ROAD_X, 0, ROAD_W, HALF * 2, roadMatNS, 0.02);
+  roadStrip(BEACH_ROAD_X - ROAD_W / 2 - 2, 0, 4, HALF * 2, walkMatNS, 0.05);
+  roadStrip(BEACH_ROAD_X + ROAD_W / 2 + 2, 0, 4, HALF * 2, walkMatNS, 0.05);
+  const barrierMat = mat('#8a8f94', { kind: 'concrete' });
   box(HALF * 2, 1.2, 1, barrierMat, 0, 0.6, HW_N - HW_W / 2 - 1);
   box(HALF * 2, 1.2, 1, barrierMat, 0, 0.6, HW_N + HW_W / 2 + 1);
   box(1, 1.2, HALF * 2, barrierMat, HW_E - HW_W / 2 - 1, 0.6, 0);
@@ -368,7 +563,7 @@ export function buildWorld(scene, CFG = CFG3D) {
         const t = facadeTextures(district.wall, district.trim, 0.25 + rng() * 0.25, rng, ftype, rngB4);
         const m = new THREE.MeshStandardMaterial({
           map: t.map, emissiveMap: t.emissive, emissive: new THREE.Color('#ffb45c'),
-          emissiveIntensity: 0.15, roughness: 0.85,
+          emissiveIntensity: 0.15, roughness: 0.8,
         });
         set.push({ m, type: ftype });
         facadeMats.push(m);
@@ -383,9 +578,9 @@ export function buildWorld(scene, CFG = CFG3D) {
   // InstancedMeshes, so the window bands read recessed instead of flat
   // without a draw call per building. Parapets likewise. Rooftop props
   // and storefronts are ordinary meshes (few dozen each).
-  const ledgeMat = mat('#cfc8b8', { roughness: 0.95 });
+  const ledgeMat = mat('#cfc8b8', { kind: 'concrete' });
   const mullionMat = mat('#33383f', { roughness: 0.7, metalness: 0.2 });
-  const parapetMat = mat('#4a4640', { roughness: 0.95 });
+  const parapetMat = mat('#4a4640', { kind: 'concrete' });
   const acMat = mat('#9aa0a6', { roughness: 0.6, metalness: 0.4 });
   const tankMat = mat('#8a6f4d', { roughness: 0.9 });
   const antMat = mat('#5a5f66', { roughness: 0.5, metalness: 0.6 });
@@ -414,6 +609,40 @@ export function buildWorld(scene, CFG = CFG3D) {
     // The shared dummy is reused by palms/pools below — leave it clean.
     dummy.scale.set(1, 1, 1);
     dummy.rotation.set(0, 0, 0);
+    return im;
+  }
+
+  // R9 C4: wall-base AO — a dark gradient strip where walls meet the
+  // ground (0.5 m tall, 0.06 m proud of the face so it never
+  // z-fights), plus strips under balconies and shop awnings. One
+  // InstancedMesh for the whole city, drawn once before the return.
+  // The gradient is darkest at the wall base and fades upward, so it
+  // reads as contact shadow, not a painted band.
+  const aoTex = canvasTexture(4, 64, (g, w, h) => {
+    const grd = g.createLinearGradient(0, h, 0, 0);
+    grd.addColorStop(0, 'rgba(0,0,0,0.55)');
+    grd.addColorStop(0.7, 'rgba(0,0,0,0.18)');
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd; g.fillRect(0, 0, w, h);
+  });
+  const aoMat = new THREE.MeshBasicMaterial({
+    map: aoTex, transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+  });
+  const aoSpots = []; // [x, y, z, sx, sy, ry] — plane faces +z, ry turns it
+  function instancedAO(spots, material) {
+    const im = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), material, spots.length);
+    spots.forEach(([x, y, z, sx, sy, ry], i) => {
+      dummy.position.set(x, y, z);
+      dummy.scale.set(sx, sy, 1);
+      dummy.rotation.set(0, ry, 0);
+      dummy.updateMatrix();
+      im.setMatrixAt(i, dummy.matrix);
+    });
+    im.instanceMatrix.needsUpdate = true;
+    dummy.scale.set(1, 1, 1);
+    dummy.rotation.set(0, 0, 0);
+    group.add(im);
     return im;
   }
 
@@ -650,7 +879,7 @@ export function buildWorld(scene, CFG = CFG3D) {
       if (!district) { fillCentralPark(cx, cz); continue; }
       if (rng() > district.density) { fillEmptyLot(cx, cz, district); continue; }
       const facades = facadeMatFor(district);
-      const roofMat = mat(district.roof, { roughness: 0.9 });
+      const roofMat = mat(district.roof, { kind: 'concrete' });
       const [hMin, hMax] = district.height;
       const inset = ROAD_W / 2 + CFG.SIDEWALK + 12;
       const span = BLOCK - inset * 2;
@@ -693,7 +922,11 @@ export function buildWorld(scene, CFG = CFG3D) {
         if (isPodium) {
           // Plain stucco base (the facade texture would squeeze 9–15
           // storeys into 6 m); the shopfronts break it up.
-          const podium = new THREE.Mesh(new THREE.BoxGeometry(podiumW, podiumH, podiumD), mat(district.wall, { roughness: 0.9 }));
+          // R9 B1: rounded box (radius 0.3) — the podium is the part
+          // of the building the chase camera actually touches, and a
+          // bevelled edge catches a highlight where a sharp box never
+          // does. Never a canvas-textured facade, so no UV risk.
+          const podium = new THREE.Mesh(roundedBoxGeometry(podiumW, podiumH, podiumD, 0.3), mat(district.wall, { kind: 'wall' }));
           podium.position.set(lx, podiumH / 2, lz);
           podium.castShadow = true;
           podium.receiveShadow = true;
@@ -736,6 +969,7 @@ export function buildWorld(scene, CFG = CFG3D) {
               const bx = lx - w / 4 + b * (w / 2);
               balconySpots.push([bx, by, lz + d / 2 + 0.55, 2.4, 0.18, 1.1]);
               mullionSpots.push([bx, by + 0.55, lz + d / 2 + 1.05, 2.4, 0.9, 0.12]);
+              aoSpots.push([bx, by - 0.4, lz + d / 2 + 0.06, 2.4, 0.5, 0]); // R9 C4: under-balcony AO
               stats.balconies++;
             }
           }
@@ -748,6 +982,21 @@ export function buildWorld(scene, CFG = CFG3D) {
           parapetSpots.push([lx, py, lz - d / 2, w + 1, 1.0, 0.5]);
           parapetSpots.push([lx + w / 2, py, lz, 0.5, 1.0, d + 1]);
           parapetSpots.push([lx - w / 2, py, lz, 0.5, 1.0, d + 1]);
+        }
+        // R9 C4: wall-base AO strips — one per face around the widest
+        // footprint (podium when there is one), plus a second ring
+        // where the tower meets the podium top.
+        const aoW = isPodium ? podiumW : w, aoD = isPodium ? podiumD : d;
+        aoSpots.push([lx, 0.25, lz + aoD / 2 + 0.06, aoW, 0.5, 0]);
+        aoSpots.push([lx, 0.25, lz - aoD / 2 - 0.06, aoW, 0.5, Math.PI]);
+        aoSpots.push([lx + aoW / 2 + 0.06, 0.25, lz, aoD, 0.5, Math.PI / 2]);
+        aoSpots.push([lx - aoW / 2 - 0.06, 0.25, lz, aoD, 0.5, -Math.PI / 2]);
+        if (isPodium) {
+          const ty = podiumH + 0.25;
+          aoSpots.push([lx, ty, lz + d / 2 + 0.06, w, 0.5, 0]);
+          aoSpots.push([lx, ty, lz - d / 2 - 0.06, w, 0.5, Math.PI]);
+          aoSpots.push([lx + w / 2 + 0.06, ty, lz, d, 0.5, Math.PI / 2]);
+          aoSpots.push([lx - w / 2 - 0.06, ty, lz, d, 0.5, -Math.PI / 2]);
         }
         // R7: stepped setback — top floors inset on tall towers.
         if (isSetback) {
@@ -817,6 +1066,7 @@ export function buildWorld(scene, CFG = CFG3D) {
           awn.rotation.x = -Math.PI / 2 + 0.45;
           awn.position.set(lx, 3.9, frontZ + 1.1);
           group.add(awn);
+          aoSpots.push([lx, 3.55, frontZ + 0.06, Math.min(frontW * 0.85, 24), 0.5, 0]); // R9 C4: under-awning AO
           box(Math.min(frontW * 0.6, 16), 1.1, 0.35, fasciaMats[Math.floor(rngB4() * fasciaMats.length)], lx, 4.9, frontZ + 0.3);
           // R7: blade sign — a fin perpendicular to the facade, read
           // from down the street, on 1 in 3 shops.
@@ -846,7 +1096,24 @@ export function buildWorld(scene, CFG = CFG3D) {
   if (carCabinSpots.length) instancedBoxes(carCabinSpots, carCabinMat);
   if (baySpots.length) instancedBoxes(baySpots, bayMat);
   if (padSpots.length) instancedBoxes(padSpots, padWhiteMat, padColors);
-  if (stallCounterSpots.length) instancedBoxes(stallCounterSpots, stallCounterMat);
+  // R9 B1: shop counters get the rounded box too — every stall
+  // counter is the same 10 x 2.4 x 5, so one shared rounded geometry
+  // works with translation-only instance matrices (no non-uniform
+  // scale, so the bevel stays exact). Instanced: still 1 draw call.
+  if (stallCounterSpots.length) {
+    const counterGeo = roundedBoxGeometry(10, 2.4, 5, 0.25);
+    const counters = new THREE.InstancedMesh(counterGeo, stallCounterMat, stallCounterSpots.length);
+    stallCounterSpots.forEach(([x, y, z], i) => {
+      dummy.position.set(x, y, z);
+      dummy.scale.set(1, 1, 1);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      counters.setMatrixAt(i, dummy.matrix);
+    });
+    counters.instanceMatrix.needsUpdate = true;
+    counters.receiveShadow = true;
+    group.add(counters);
+  }
   if (stallAwningSpots.length) instancedBoxes(stallAwningSpots, awningMatB4);
   if (stallGoodsSpots.length) instancedBoxes(stallGoodsSpots, stallGoodsMat, stallGoodsColors);
   if (fenceSpots.length) instancedBoxes(fenceSpots, fenceMat);
@@ -1043,7 +1310,7 @@ export function buildWorld(scene, CFG = CFG3D) {
       const sz = 100 + (i < 5 ? -28 : 28);
       const stall = new THREE.Group();
       stall.position.set(sx, 0, sz);
-      const counter = new THREE.Mesh(new THREE.BoxGeometry(10, 2.4, 5), stallBaseMat);
+      const counter = new THREE.Mesh(roundedBoxGeometry(10, 2.4, 5, 0.25), stallBaseMat); // R9 B1: rounded shop counter
       counter.position.y = 1.2;
       counter.castShadow = true;
       const awning = new THREE.Mesh(
@@ -1578,8 +1845,18 @@ export function buildWorld(scene, CFG = CFG3D) {
       id: 'clinic', name: 'CLINICA PLAYA', x: -1520, z: 300,
       spawn: { x: -1494, z: 300, angle: Math.PI },
     });
+    // R9 C4: wall-base AO strips for both hospitals.
+    for (const [hx, hz, hw, hd] of [[52, -500, 64, 40], [-1520, 300, 30, 20]]) {
+      aoSpots.push([hx, 0.25, hz + hd / 2 + 0.06, hw, 0.5, 0]);
+      aoSpots.push([hx, 0.25, hz - hd / 2 - 0.06, hw, 0.5, Math.PI]);
+      aoSpots.push([hx + hw / 2 + 0.06, 0.25, hz, hd, 0.5, Math.PI / 2]);
+      aoSpots.push([hx - hw / 2 - 0.06, 0.25, hz, hd, 0.5, -Math.PI / 2]);
+    }
     stats.hospitals = hospitals.length;
   }
+
+  // R9 C4: draw the collected wall-base AO strips (~1 draw call).
+  if (aoSpots.length) instancedAO(aoSpots, aoMat);
 
   return {
     group, roads: roadCentres, junctions, trafficLights, buildings, colliders,

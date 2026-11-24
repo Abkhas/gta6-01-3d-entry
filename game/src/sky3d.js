@@ -20,6 +20,7 @@ function softBlobTexture() {
   }
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = CFG3D.PERF.maxAnisotropy || 4; // r9 A1: device max, shared constant
   return tex;
 }
 
@@ -35,6 +36,7 @@ function glowTexture() {
   g.fillRect(0, 0, 128, 128);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = CFG3D.PERF.maxAnisotropy || 4; // r9 A1
   return tex;
 }
 
@@ -54,18 +56,24 @@ function starTexture() {
   g.fillRect(0, 0, 64, 64);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = CFG3D.PERF.maxAnisotropy || 4; // r9 A1
   return tex;
 }
 
 export function createSky(scene) {
   const sky = {};
 
-  // Gradient dome: vertex-height mix between horizon and zenith colours.
+  // Gradient dome: three-stop vertical gradient (horizon -> mid ->
+  // zenith) so the sky has a warm band at golden hour instead of a
+  // flat two-colour blend. A ±0.4% hash dither on the fragment kills
+  // the gradient banding a smooth dome shows on a big sky. (r9 C5)
   const domeMat = new THREE.ShaderMaterial({
     side: THREE.BackSide,
     depthWrite: false,
+    fog: false,
     uniforms: {
       topColor: { value: new THREE.Color('#3f7fd0') },
+      midColor: { value: new THREE.Color('#79aede') },
       horizonColor: { value: new THREE.Color('#cfe4f2') },
     },
     vertexShader: `
@@ -76,11 +84,17 @@ export function createSky(scene) {
       }`,
     fragmentShader: `
       uniform vec3 topColor;
+      uniform vec3 midColor;
       uniform vec3 horizonColor;
       varying vec3 vPos;
       void main() {
         float h = clamp(normalize(vPos).y * 1.6 + 0.12, 0.0, 1.0);
-        gl_FragColor = vec4(mix(horizonColor, topColor, h), 1.0);
+        vec3 col = h < 0.45
+          ? mix(horizonColor, midColor, h / 0.45)
+          : mix(midColor, topColor, (h - 0.45) / 0.55);
+        // Dither: one hash step per pixel, far below perception, breaks banding.
+        float n = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+        gl_FragColor = vec4(col + (n - 0.5) * 0.008, 1.0);
       }`,
   });
   const dome = new THREE.Mesh(new THREE.SphereGeometry(6000, 24, 16), domeMat);
@@ -104,6 +118,49 @@ export function createSky(scene) {
   sunGlow.scale.set(1100, 1100, 1);
   scene.add(sunGlow);
   sky.sunGlow = sunGlow;
+
+  // r9 C5: outer sun halo — a second, much larger and fainter glow
+  // sprite reusing the same radial texture, so the sun reads as a
+  // disc with a soft halo instead of a hard circle. Additive look via
+  // low opacity + depthWrite off; fog:false, renders behind nothing
+  // (sprites sort with the scene, no renderOrder hack needed).
+  const sunHalo = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glowTexture(), color: '#ffe9b8', transparent: true, opacity: 0.28,
+    depthWrite: false, fog: false,
+  }));
+  sunHalo.scale.set(2600, 2600, 1);
+  scene.add(sunHalo);
+  sky.sunHalo = sunHalo;
+
+  // r9 C5: distant skyline silhouette — a sparse ring of dark
+  // low-poly slabs just outside the city edge (1600-2000 m), fog-faded
+  // so the horizon is a hazy skyline instead of a hard line. One
+  // shared geometry + one shared MeshBasicMaterial (fog:true does the
+  // fading per grade); no shadows, no colliders, purely visual. The
+  // west quadrant is left open — that is ocean, not city — and the
+  // ring sits outside the 1400 m city bound so play never reaches it.
+  // Fog far is 2500 by day / 1800 at night (r9 A5), so at 1600-2000 m
+  // the slabs are 40-75% fogged: present, never hard-edged.
+  const skylineMat = new THREE.MeshBasicMaterial({ color: '#33414f', fog: true });
+  const skylineGeo = new THREE.BoxGeometry(1, 1, 1);
+  sky.skyline = [];
+  for (let i = 0; i < 26; i++) {
+    const a = (i / 26) * Math.PI * 2 + 0.11;
+    const x = Math.cos(a);
+    const z = Math.sin(a);
+    if (x < -0.55) continue; // west = ocean, no skyline
+    const r = 1650 + ((i * 265) % 350);
+    const w = 120 + ((i * 97) % 180);
+    const h = 120 + ((i * 173) % 300);
+    const slab = new THREE.Mesh(skylineGeo, skylineMat);
+    slab.position.set(x * r, h / 2 - 10, z * r);
+    slab.scale.set(w, h, 60 + ((i * 53) % 80));
+    slab.rotation.y = -a;
+    slab.name = 'SkylineSilhouette';
+    scene.add(slab);
+    sky.skyline.push(slab);
+  }
+  sky.skylineMat = skylineMat;
 
   const moonMat = new THREE.MeshBasicMaterial({ color: '#dfe6f2', fog: false });
   const moon = new THREE.Mesh(new THREE.CircleGeometry(90, 32), moonMat);
@@ -172,6 +229,10 @@ export function createSky(scene) {
   sunLight.shadow.camera.far = 2600;
   sunLight.shadow.camera.updateProjectionMatrix();
   sunLight.shadow.bias = -0.0004;
+  // r9 A4: normalBias kills acne / peter-panning on rounded geometry
+  // once B-geometry lands. Do NOT use shadow.radius (ignored under
+  // PCFSoftShadowMap in r160) and do NOT switch to VSM.
+  sunLight.shadow.normalBias = CFG3D.PERF.SHADOW_NORMAL_BIAS ?? 0.03;
   scene.add(sunLight);
   scene.add(sunLight.target);
   sky.sunLight = sunLight;
@@ -295,13 +356,25 @@ export function setTimeOfDay(scene, grade, world = null) {
   }
 
   sky.domeMat.uniforms.topColor.value.set(fg.skyTop);
+  sky.domeMat.uniforms.midColor.value.set(
+    fg.skyMid || '#' + lerpColor(fg.skyHorizon, fg.skyTop, 0.45).getHexString(),
+  );
   sky.domeMat.uniforms.horizonColor.value.set(fg.skyHorizon);
 
   placeBody(sky.sun, fg.sunElevation, fg.sunAzimuth);
   sky.sunGlow.position.copy(sky.sun.position);
+  if (sky.sunHalo) sky.sunHalo.position.copy(sky.sun.position);
   sky.sunMat.color.set(fg.sunColor);
   sky.sun.visible = fg.sunElevation > 0;
   sky.sunGlow.material.opacity = fg.sunElevation > 0 ? 0.85 : 0;
+  if (sky.sunHalo) sky.sunHalo.material.opacity = fg.sunElevation > 0 ? 0.28 : 0;
+  // r9 C5: low sun = bigger halo (golden hour glows, noon stays tight).
+  const haloScale = 1100 * (1.6 - Math.min(1, Math.max(0, (fg.sunElevation || 30) / 74)) * 0.6);
+  sky.sunGlow.scale.set(haloScale, haloScale, 1);
+  if (sky.sunHalo) {
+    const outer = haloScale * 2.4;
+    sky.sunHalo.scale.set(outer, outer, 1);
+  }
   // The moon hangs HIGH and to the EAST SIDE (elevation 68, azimuth
   // 70), not mirrored off the sun: the old mirror put it low enough
   // to sit on the title screen's save slots, which live lower-center.
@@ -329,6 +402,22 @@ export function setTimeOfDay(scene, grade, world = null) {
   }
   scene.background = null; // the dome is the background
 
+  // r9 A6: exposure is driven from the grade (golden hour ~1.15, noon
+  // 1.05, deep night ~0.90). The night floor above keeps hemi/sun
+  // lifted, so 0.90 is a mood shift, NOT a return to the r5 black-void
+  // night — the street stays readable. Applied here because
+  // daynight.update calls setTimeOfDay every frame; main3d.js covers
+  // the very first call (before window.__palma3d exists) itself.
+  // r9 C1: dim envMapIntensity at night by the same grade.
+  applyEnvMapIntensity(scene, nightness);
+  try {
+    if (typeof window !== 'undefined' && window.__palma3d && window.__palma3d.renderer) {
+      if (typeof fg.exposure === 'number') {
+        window.__palma3d.renderer.toneMappingExposure = fg.exposure;
+      }
+    }
+  } catch (e) { /* exposure is best-effort; never break the frame */ }
+
   for (const c of sky.clouds) c.material.color.set(fg.cloudTint);
   sky.clouds.forEach((c) => { c.material.opacity = fg.stars > 0 ? 0.3 : 0.85; });
 
@@ -339,6 +428,40 @@ export function setTimeOfDay(scene, grade, world = null) {
   }
   sky.grade = fg;
   return fg;
+}
+
+// ---- r9 C1: per-material envMapIntensity --------------------------------
+// scene.environmentIntensity does NOT exist in r160, so intensity is
+// per material. Rule (constants in CFG3D.PERF): metalness >= 0.3 — car
+// paint, glass, chrome — gets base 1.0; everything else (buildings,
+// ground, trim) gets base 0.3, so the env map adds life without
+// washing the city to pastel. The base is stored on the material the
+// first time it is seen, so a later night pass re-uses it instead of
+// re-deriving it, and materials created after boot (traffic cars,
+// hero car) pick up the same rule on the next pass. The traverse only
+// runs when the night factor actually moved (> 0.02) — setTimeOfDay
+// is called every frame by daynight.update, so an unguarded traverse
+// would cost a full scene walk per frame.
+export function applyEnvMapIntensity(scene, nightness) {
+  const sky = scene.userData.palmaSky;
+  if (!sky) return;
+  const n = Math.min(1, Math.max(0, nightness ?? 0));
+  const factor = 1 - (CFG3D.PERF.ENV_NIGHT_DIM ?? 0.45) * n;
+  if (sky.lastEnvFactor != null && Math.abs(factor - sky.lastEnvFactor) <= 0.02) return;
+  sky.lastEnvFactor = factor;
+  const paint = CFG3D.PERF.ENV_INTENSITY_PAINT ?? 1.0;
+  const world = CFG3D.PERF.ENV_INTENSITY_WORLD ?? 0.3;
+  scene.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (!m || !m.isMeshStandardMaterial) continue;
+      if (m.userData.envBase == null) {
+        m.userData.envBase = (m.metalness ?? 0) >= 0.3 ? paint : world;
+      }
+      m.envMapIntensity = m.userData.envBase * factor;
+    }
+  });
 }
 
 // Per-frame sky motion: clouds drift with the wind, the wheel of the pier
@@ -359,8 +482,15 @@ export function updateSky(scene, dt) {
   if (CFG3D.PERF.dynamicDpr !== false) {
     try {
       if (typeof window !== 'undefined' && window.__palma3d && window.__palma3d.renderer) {
+        const live = window.__palma3d.renderer.getPixelRatio();
         if (!sky.dprGovernor) {
-          sky.dprGovernor = createDprGovernor(window.__palma3d.renderer.getPixelRatio());
+          sky.dprGovernor = createDprGovernor(live);
+        } else if (Math.abs(live - sky.dprGovernor.ratio) > 0.01) {
+          // r9 A2: the live ratio moved out from under the governor
+          // (setupShotMode forces DPR 2) — re-sync instead of
+          // stepping from a stale rung. Floor stays 1.25: the ladder
+          // in CFG3D.PERF.DPR_LEVELS no longer contains 1.
+          sky.dprGovernor = createDprGovernor(live);
         }
         const next = sky.dprGovernor.update((dt || 0.016) * 1000);
         if (next != null) window.__palma3d.renderer.setPixelRatio(next);

@@ -80,7 +80,14 @@ function setHudLine(text) {
 // preserveDrawingBuffer stays on: the flow test samples the canvas
 // pixels to prove a shot rendered, and the capture page needs it too.
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+// r9 A1: anisotropy = device max. Written here, before buildWorld
+// runs, so world3d.js / trafficlights3d.js can read the shared value
+// as CFG3D.PERF.maxAnisotropy instead of hardcoding 4 (their texture
+// sites are NOT this file's — coordinator to wire them to the constant).
+CFG3D.PERF.maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+// r9 A2: live-play DPR floor is 1.25, never 1 (DPR 1 at 1280x720 is
+// visibly pixelated); the r8 governor ladder in CFG3D.PERF matches.
+renderer.setPixelRatio(Math.min(Math.max(window.devicePixelRatio || 1, CFG3D.PERF.DPR_MIN), 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 // r8 B6 follow-up: the shadow map re-renders the whole city every
@@ -95,12 +102,68 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.5, 14000);
 
+// ---- r9 C1: scene.environment via PMREM, zero downloads ----------------
+// NOTE: the vendored three.js has NO RoomEnvironment addon and the
+// import map has no `three/addons` entry, so importing
+// 'three/addons/environments/RoomEnvironment.js' cannot work. Instead
+// this builds the same thing in code: a small procedural "room" scene
+// (grey shell + bright emissive panels for ceiling light, warm windows
+// and cool sky) and bakes it through THREE.PMREMGenerator, which IS in
+// the vendored core. Without an environment map every
+// MeshStandardMaterial is pure diffuse — no specular at all — which is
+// why paint/glass read as matte plastic. Per-material intensity is NOT
+// scene.environmentIntensity (does not exist in r160): sky3d.js sets
+// envMapIntensity per material (paint/glass 1.0, buildings/ground 0.3,
+// dimmed at night) — see CFG3D.PERF.ENV_INTENSITY_*.
+function buildEnvironmentMap() {
+  const envScene = new THREE.Scene();
+  const shell = new THREE.Mesh(
+    new THREE.BoxGeometry(40, 20, 40),
+    new THREE.MeshBasicMaterial({ side: THREE.BackSide }),
+  );
+  shell.material.color.setRGB(0.32, 0.35, 0.40);
+  envScene.add(shell);
+  function panel(w, h, x, y, z, rx, ry, r, g, b) {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial(),
+    );
+    // Colour components above 1: the panels are light sources, not paint.
+    m.material.color.setRGB(r, g, b);
+    m.position.set(x, y, z);
+    m.rotation.set(rx, ry, 0);
+    envScene.add(m);
+  }
+  panel(16, 8, 0, 9.9, 0, Math.PI / 2, 0, 5.0, 5.0, 4.6);   // ceiling light
+  panel(10, 5, -19.9, 4, 0, 0, Math.PI / 2, 3.2, 2.5, 1.6);  // warm west window
+  panel(10, 5, 19.9, 4, 0, 0, -Math.PI / 2, 3.2, 2.5, 1.6);  // warm east window
+  panel(14, 6, 0, 5, -19.9, 0, 0, 1.1, 1.5, 2.6);            // cool north sky
+  panel(14, 6, 0, 5, 19.9, 0, Math.PI, 1.4, 1.2, 1.0);        // warm south sky
+  panel(20, 12, 0, -9.9, 0, -Math.PI / 2, 0, 0.45, 0.40, 0.36); // floor bounce
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const tex = pmrem.fromScene(envScene, 0.04).texture;
+  pmrem.dispose();
+  return tex;
+}
+try {
+  scene.environment = buildEnvironmentMap();
+} catch (e) {
+  // The env map is a lighting upgrade, never a boot blocker: without
+  // it the game renders exactly as r8 did (sun + hemisphere only).
+  reportError('env map failed, continuing without it: ' + (e && e.message ? e.message : e));
+}
+
 const world = buildWorld(scene, CFG3D);
 const sky = createSky(scene);
 
 // The game opens mid-morning; the day/night system advances this.
 let clockHours = CFG3D.DAY_START_HOUR;
 let currentGrade = setTimeOfDay(scene, gradeForHour(clockHours), world);
+// r9 A6: exposure is driven from the grade (golden hour 1.15, noon
+// 1.05, deep night 0.90). setTimeOfDay re-applies it on every grade
+// change once window.__palma3d exists; this line covers the first
+// call, which runs before __palma3d is assigned below.
+renderer.toneMappingExposure = currentGrade.exposure ?? 1.05;
 
 function fitCanvas() {
   const w = window.innerWidth;
@@ -1322,6 +1385,11 @@ function setupShotMode() {
     window.__pv3d.screensProbe = 'skipped: shot=' + built.shot + ' screens=' + !!window.PalmaScreens3d;
   }
   renderShotExtras(built);
+  // r9 A2: official screenshots always render at DPR 2, even if the
+  // live-play governor has stepped down to 1.25. Left at 2 after the
+  // shot: updateSky's governor re-syncs to the live ratio on the next
+  // tick (it recreates itself when the live ratio mismatches).
+  renderer.setPixelRatio(CFG3D.PERF.DPR_SHOT);
   renderer.shadowMap.needsUpdate = true; // one shadow pass for the shot (autoUpdate is off)
   renderer.render(scene, camera);
   const sample = sampleCanvas();

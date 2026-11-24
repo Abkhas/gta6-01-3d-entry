@@ -26,8 +26,10 @@ function paint(color, roughness, metalness) {
 }
 
 function glassMat() {
+  // r9 C6: dark glass base + envMapIntensity 1.0 (takes effect once
+  // the rendering builder lands scene.environment; harmless until).
   return new THREE.MeshStandardMaterial({
-    color: 0x182840, roughness: 0.08, metalness: 0.9
+    color: 0x1c2836, roughness: 0.1, metalness: 0.6, envMapIntensity: 1.0
   });
 }
 
@@ -57,18 +59,145 @@ function normSpeed(speed) {
 }
 
 // A soft contact shadow so the car reads as sitting on the road
-// even before the scene's real shadows are tuned.
-function contactShadow(rx, rz, opacity) {
-  var m = new THREE.Mesh(
-    new THREE.CircleGeometry(1, 24),
-    new THREE.MeshBasicMaterial({
-      color: 0x000000, transparent: true, opacity: opacity,
-      depthWrite: false
-    })
-  );
+// even before the scene's real shadows are tuned. r9 C4: a
+// radial-gradient dark quad, not a hard-edged disc — one shared
+// texture / material / geometry for every car, at y 0.03 with a
+// polygon offset so it never z-fights the road.
+var blobTexCache = null;
+var blobMatCache = null;
+var blobGeoCache = null;
+function contactShadow() {
+  if (!blobTexCache) {
+    var c = document.createElement('canvas');
+    c.width = 128;
+    c.height = 128;
+    var g = c.getContext('2d');
+    var grad = g.createRadialGradient(64, 64, 4, 64, 64, 62);
+    grad.addColorStop(0, 'rgba(0,0,0,0.85)');
+    grad.addColorStop(0.55, 'rgba(0,0,0,0.45)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 128, 128);
+    blobTexCache = new THREE.CanvasTexture(c);
+  }
+  if (!blobMatCache) {
+    blobMatCache = new THREE.MeshBasicMaterial({
+      map: blobTexCache, transparent: true, opacity: 0.35,
+      depthWrite: false, polygonOffset: true,
+      polygonOffsetFactor: -2, polygonOffsetUnits: -2
+    });
+  }
+  if (!blobGeoCache) blobGeoCache = new THREE.PlaneGeometry(5.1, 2.5);
+  var m = new THREE.Mesh(blobGeoCache, blobMatCache);
   m.rotation.x = -Math.PI / 2;
-  m.scale.set(rx, rz, 1);
-  m.position.y = 0.02;
+  m.position.y = 0.03;
+  return m;
+}
+
+// ---- rounded boxes (r9 B1) ------------------------------------------
+//
+// RoundedBoxGeometry is NOT vendored (game/vendor holds only the core
+// three module, no addons/), so the bevel is built from core
+// ExtrudeGeometry instead: a rounded-rectangle shape, extruded with a
+// bevel. The shape carries half the radius in its corner arcs and the
+// bevel carries the other half, so the finished part is exactly
+// w x h x d with corner radius r — built at real size, never a
+// non-uniformly scaled unit box, so the bevel stays exact on every
+// axis. Geometries are cached by size: every car shares one body
+// geometry, so 150 cars cost one extrude, not 150.
+var roundedBoxCache = {};
+
+function roundedRectShape(w, h, r) {
+  var s = new THREE.Shape();
+  var x = -w / 2;
+  var y = -h / 2;
+  s.moveTo(x + r, y);
+  s.lineTo(x + w - r, y);
+  s.absarc(x + w - r, y + r, r, -Math.PI / 2, 0, false);
+  s.lineTo(x + w, y + h - r);
+  s.absarc(x + w - r, y + h - r, r, 0, Math.PI / 2, false);
+  s.lineTo(x + r, y + h);
+  s.absarc(x + r, y + h - r, r, Math.PI / 2, Math.PI, false);
+  s.lineTo(x, y + r);
+  s.absarc(x + r, y + r, r, Math.PI, Math.PI * 1.5, false);
+  s.closePath();
+  return s;
+}
+
+function roundedBoxGeo(w, h, d, r) {
+  var key = w + '|' + h + '|' + d + '|' + r;
+  if (roundedBoxCache[key]) return roundedBoxCache[key];
+  var b = r / 2;
+  var geo = new THREE.ExtrudeGeometry(roundedRectShape(w - r, h - r, b), {
+    depth: d - r, bevelEnabled: true, bevelThickness: b, bevelSize: b,
+    bevelSegments: 2, curveSegments: 6, steps: 1
+  });
+  geo.translate(0, 0, -(d - r) / 2);
+  // Police livery (police3d.js) re-identifies the body and skirt by
+  // geometry.parameters width/height/depth — an extrude carries the
+  // extrude options there instead, so stamp the box size back on.
+  geo.parameters = { width: w, height: h, depth: d };
+  roundedBoxCache[key] = geo;
+  return geo;
+}
+
+function rbox(w, h, d, material, x, y, z, r) {
+  var m = new THREE.Mesh(roundedBoxGeo(w, h, d, r), material);
+  m.position.set(x, y, z);
+  return m;
+}
+
+// Tumblehome greenhouse (r9 B2): a trapezoid in the Y-Z plane —
+// 1.72 m wide at the beltline, 1.45 m at the roof — extruded along
+// the car's length, so the cabin narrows toward the roof instead of
+// standing as a straight box. One shared geometry for every car.
+var greenhouseGeoCache = null;
+function greenhouseGeo() {
+  if (greenhouseGeoCache) return greenhouseGeoCache;
+  var s = new THREE.Shape();
+  s.moveTo(-0.86, -0.26);
+  s.lineTo(0.86, -0.26);
+  s.lineTo(0.725, 0.26);
+  s.lineTo(-0.725, 0.26);
+  s.closePath();
+  var geo = new THREE.ExtrudeGeometry(s, {
+    depth: 2.3, bevelEnabled: false, steps: 1
+  });
+  geo.translate(0, 0, -1.15);
+  geo.rotateY(Math.PI / 2);
+  greenhouseGeoCache = geo;
+  return geo;
+}
+
+// Dark wheel-arch recess (r9 B2): a dark disc behind each wheel, so
+// the tyre sits in a shadowed arch instead of floating on the flat
+// flank. One shared geometry for every car.
+var recessGeoCache = null;
+function recessGeo() {
+  if (!recessGeoCache) recessGeoCache = new THREE.CircleGeometry(0.46, 20);
+  return recessGeoCache;
+}
+
+// Diagonal windshield specular streak (r9 C6): a thin low-opacity
+// white plane across the windshield, tilted so it reads as a light
+// streak, not a scratch — edge-on from the side it nearly vanishes.
+// One shared geometry + material for every car.
+var streakGeoCache = null;
+var streakMatCache = null;
+function windshieldStreak() {
+  if (!streakGeoCache) {
+    streakGeoCache = new THREE.PlaneGeometry(0.10, 0.55);
+    streakGeoCache.rotateY(Math.PI / 2);
+    streakGeoCache.rotateX(0.6);
+  }
+  if (!streakMatCache) {
+    streakMatCache = new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0.22,
+      depthWrite: false
+    });
+  }
+  var m = new THREE.Mesh(streakGeoCache, streakMatCache);
+  m.position.set(1.015, 1.08, 0);
   return m;
 }
 
@@ -217,7 +346,7 @@ function buildCar(color, detailed) {
   var group = new THREE.Group();
   var body = new THREE.Group(); // leans on its suspension; wheels stay put
   group.add(body);
-  group.add(contactShadow(2.55, 1.25, 0.25));
+  group.add(contactShadow());
 
   // Beam splash + light pool on the road ahead, in the group (not
   // the leaning body) so they stay glued to the asphalt. The splash
@@ -239,37 +368,72 @@ function buildCar(color, detailed) {
   group.add(pool);
 
   var base = new THREE.Color(color);
-  var bodyMat = paint(color, 0.35, 0.6);
+  // r9 C2: the hero gets a real clearcoat paint job —
+  // MeshPhysicalMaterial with clearcoat 1 — while traffic keeps the
+  // cheaper MeshStandardMaterial (never physical on traffic).
+  var bodyMat = detailed
+    ? new THREE.MeshPhysicalMaterial({
+        color: color, roughness: 0.3, metalness: 0.7,
+        clearcoat: 1, clearcoatRoughness: 0.1, envMapIntensity: 1.0
+      })
+    : paint(color, 0.35, 0.6);
   var skirtMat = paint(base.clone().multiplyScalar(0.55).getHex(), 0.5, 0.4);
   var glass = glassMat();
 
   // Main body, low skirt, sloped hood: a long low shape, not a box
-  // with a box on top.
-  body.add(box(4.6, 0.55, 2.0, bodyMat, 0, 0.55, 0));
-  body.add(box(4.4, 0.22, 1.9, skirtMat, 0, 0.28, 0));
-  var hood = box(1.2, 0.16, 1.86, bodyMat, 1.55, 0.86, 0);
+  // with a box on top. r9 B1: the body is a rounded box (bevel
+  // catches a highlight); the hero gets the skirt and hood rounded
+  // too, traffic keeps them sharp to hold the triangle budget.
+  body.add(rbox(4.6, 0.55, 2.0, bodyMat, 0, 0.55, 0, 0.06));
+  if (detailed) {
+    body.add(rbox(4.4, 0.22, 1.9, skirtMat, 0, 0.28, 0, 0.05));
+  } else {
+    body.add(box(4.4, 0.22, 1.9, skirtMat, 0, 0.28, 0));
+  }
+  var hood = detailed
+    ? rbox(1.2, 0.16, 1.86, bodyMat, 1.55, 0.86, 0, 0.04)
+    : box(1.2, 0.16, 1.86, bodyMat, 1.55, 0.86, 0);
   hood.rotation.z = -0.10;
   body.add(hood);
   // Glasshouse with a painted roof panel, so the cabin reads as
-  // glass from every angle and paint from above.
-  body.add(box(2.3, 0.52, 1.72, glass, -0.15, 1.08, 0));
-  body.add(box(2.3, 0.08, 1.5, bodyMat, -0.15, 1.36, 0));
-  // Windshield light streak.
-  var streak = box(0.02, 0.34, 0.5,
-    new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.3
-    }), 1.02, 1.08, 0);
-  body.add(streak);
+  // glass from every angle and paint from above. The hero cabin is
+  // the tumblehome trapezoid; traffic keeps the straight box.
+  if (detailed) {
+    var cabin = new THREE.Mesh(greenhouseGeo(), glass);
+    cabin.position.set(-0.15, 1.08, 0);
+    body.add(cabin);
+  } else {
+    body.add(box(2.3, 0.52, 1.72, glass, -0.15, 1.08, 0));
+  }
+  if (detailed) {
+    body.add(rbox(2.3, 0.08, 1.5, bodyMat, -0.15, 1.36, 0, 0.03));
+  } else {
+    body.add(box(2.3, 0.08, 1.5, bodyMat, -0.15, 1.36, 0));
+  }
+  // Windshield light streak: a diagonal white plane across the
+  // windshield (r9 C6) — a specular streak, not a scratch.
+  body.add(windshieldStreak());
   // Rear window: a distinct dark glass panel set into the back face
   // of the glasshouse, so the rear reads as glass, not painted body.
-  body.add(box(0.05, 0.42, 1.5, glass, -1.31, 1.08, 0));
+  // The hero pane is narrower so its top corners stay inside the
+  // trapezoid's sloping flanks.
+  body.add(box(0.05, 0.42, detailed ? 1.44 : 1.5, glass, -1.31, 1.08, 0));
   // Side glass: proud dark panels on both flanks of the glasshouse,
   // split front/rear by a body-colour B-pillar strip, with a
   // beltline under them.
+  // Hero side glass follows the trapezoid slope (14.6 deg in from
+  // the beltline); traffic glass stays flat on the straight box
+  // cabin. The tilt is about the x-axis so the top edge leans in.
+  var glassZ = detailed ? 0.8125 : 0.87;
+  var glassTilt = detailed ? -0.255 : 0;
   for (var sg = -1; sg <= 1; sg += 2) {
-    body.add(box(2.0, 0.38, 0.04, glass, -0.15, 1.08, 0.87 * sg));
-    body.add(box(0.06, 0.38, 0.05, bodyMat, -0.15, 1.08, 0.87 * sg));
-    body.add(box(2.3, 0.05, 0.02, darkMat(), -0.15, 0.84, 0.87 * sg));
+    var sideGlass = box(2.0, 0.38, 0.04, glass, -0.15, 1.08, glassZ * sg);
+    sideGlass.rotation.x = glassTilt * sg;
+    body.add(sideGlass);
+    var bPillar = box(0.06, 0.38, 0.05, bodyMat, -0.15, 1.08, glassZ * sg);
+    bPillar.rotation.x = glassTilt * sg;
+    body.add(bPillar);
+    body.add(box(2.3, 0.05, 0.02, darkMat(), -0.15, 0.84, (detailed ? 0.86 : 0.87) * sg));
     // Panel lines: a side character line, door shut lines, and
     // door handles, so the flanks read as panelled bodywork.
     body.add(box(3.8, 0.03, 0.02, darkMat(), 0, 0.70, 1.005 * sg));
@@ -278,14 +442,34 @@ function buildCar(color, detailed) {
     body.add(box(0.22, 0.05, 0.04, darkMat(), 0.35, 0.78, 1.01 * sg));
     body.add(box(0.22, 0.05, 0.04, darkMat(), -0.55, 0.78, 1.01 * sg));
   }
-  // Trunk shut line across the deck.
-  body.add(box(0.03, 0.02, 1.7, darkMat(), -1.95, 0.84, 0));
+  // Trunk shut line across the deck. On the hero it rides the
+  // sloped decklid (below); on traffic it stays on the flat deck.
+  if (detailed) {
+    var trunkShut = box(0.03, 0.02, 1.7, darkMat(), -1.95, 0.905, 0);
+    trunkShut.rotation.z = 0.08;
+    body.add(trunkShut);
+  } else {
+    body.add(box(0.03, 0.02, 1.7, darkMat(), -1.95, 0.84, 0));
+  }
+  // Sloped trunk deck (hero, r9 B2): a thin decklid sloping down
+  // toward the rear, so the tail is a slope, not a flat top. Its
+  // rearmost point is x -2.3, inside the 4.6 m collision box.
+  if (detailed) {
+    var trunk = rbox(0.9, 0.10, 1.86, bodyMat, -1.85, 0.86, 0, 0.03);
+    trunk.rotation.z = 0.08;
+    body.add(trunk);
+  }
   // Grille, bumpers, lamps.
   body.add(box(0.04, 0.18, 1.1, darkMat(), 2.31, 0.45, 0));
   body.add(box(0.04, 0.05, 1.1,
     paint(0xc0c0c0, 0.3, 0.9), 2.33, 0.45, 0));
-  body.add(box(0.12, 0.16, 2.02, darkMat(), 2.32, 0.30, 0));
-  body.add(box(0.12, 0.16, 2.02, darkMat(), -2.32, 0.30, 0));
+  if (detailed) {
+    body.add(rbox(0.12, 0.16, 2.02, darkMat(), 2.32, 0.30, 0, 0.04));
+    body.add(rbox(0.12, 0.16, 2.02, darkMat(), -2.32, 0.30, 0, 0.04));
+  } else {
+    body.add(box(0.12, 0.16, 2.02, darkMat(), 2.32, 0.30, 0));
+    body.add(box(0.12, 0.16, 2.02, darkMat(), -2.32, 0.30, 0));
+  }
   var headMat = lampMat(0xfff2b0);
   var tailMat = lampMat(0xff2e2e);
   tailMat.emissiveIntensity = 1.5; // taillights glow from behind
@@ -368,18 +552,33 @@ function buildCar(color, detailed) {
     });
     body.add(box(1.6, 0.02, 0.5, stripeMat, 1.5, 0.86, 0));
     body.add(box(2.3, 0.02, 0.5, stripeMat, -0.15, 1.41, 0));
-    body.add(box(0.9, 0.02, 0.5, stripeMat, -1.85, 0.84, 0));
+    // The trunk stripe rides the sloped decklid, not the flat deck.
+    var trunkStripe = box(0.9, 0.02, 0.5, stripeMat, -1.85, 0.92, 0);
+    trunkStripe.rotation.z = 0.08;
+    body.add(trunkStripe);
     // Rear spoiler on two posts, with a centre third brake light
     // facing the chase camera.
     body.add(box(0.08, 0.18, 0.08, skirtMat, -2.15, 0.92, 0.6));
     body.add(box(0.08, 0.18, 0.08, skirtMat, -2.15, 0.92, -0.6));
-    body.add(box(0.5, 0.06, 1.9, skirtMat, -2.18, 1.03, 0));
+    body.add(rbox(0.5, 0.06, 1.9, skirtMat, -2.18, 1.03, 0, 0.02));
     body.add(box(0.06, 0.05, 0.5, tailMat, -2.44, 1.04, 0));
     // Wheel-arch eyebrows over each wheel, so the arches read
     // from the side and the rear three-quarter.
     for (var fa = -1; fa <= 1; fa += 2) {
       for (var fb = -1; fb <= 1; fb += 2) {
         body.add(box(1.0, 0.08, 0.06, skirtMat, WHEEL_X * fa, 0.82, 1.02 * fb));
+      }
+    }
+    // Wheel-arch recesses (r9 B2): a dark disc behind each wheel,
+    // so the tyre sits in a shadowed arch instead of floating on
+    // the flat flank. Hero only — +4 meshes per car would cost
+    // ~600 draw calls across the traffic fleet.
+    for (var ra = -1; ra <= 1; ra += 2) {
+      for (var rb = -1; rb <= 1; rb += 2) {
+        var recess = new THREE.Mesh(recessGeo(), darkMat());
+        recess.position.set(WHEEL_X * ra, WHEEL_R, 1.01 * rb);
+        if (rb < 0) recess.rotation.y = Math.PI;
+        body.add(recess);
       }
     }
     // Side mirrors.

@@ -191,7 +191,7 @@ function markingTexture(THREE) {
   g.fillRect(X(11.75), Y(-7), 0.5 * m, 7 * m); // westbound
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
+  tex.anisotropy = CFG.PERF.maxAnisotropy || 4;
   return tex;
 }
 

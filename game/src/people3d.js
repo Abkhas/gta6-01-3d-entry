@@ -44,6 +44,83 @@ function limb(rTop, rBottom, len, material) {
   return pivot;
 }
 
+function capsuleLimb(radius, len, material) {
+  // A capsule pivoted at its top end (same swing contract as limb).
+  // len is the cylindrical mid-section; total length is len + 2*radius.
+  // The rounded top reads as a shoulder, the rounded bottom as a wrist.
+  var mesh = new THREE.Mesh(
+    new THREE.CapsuleGeometry(radius, len, 4, 12), material);
+  mesh.position.y = -(len / 2 + radius);
+  var pivot = new THREE.Group();
+  pivot.add(mesh);
+  return pivot;
+}
+
+function roundedRectShape(w, h, r) {
+  var s = new THREE.Shape();
+  var x = -w / 2, y = -h / 2;
+  s.moveTo(x + r, y);
+  s.lineTo(x + w - r, y);
+  s.absarc(x + w - r, y + r, r, -Math.PI / 2, 0, false);
+  s.lineTo(x + w, y + h - r);
+  s.absarc(x + w - r, y + h - r, r, 0, Math.PI / 2, false);
+  s.lineTo(x + r, y + h);
+  s.absarc(x + r, y + h - r, r, Math.PI / 2, Math.PI, false);
+  s.lineTo(x, y + r);
+  s.absarc(x + r, y + r, r, Math.PI, Math.PI * 1.5, false);
+  return s;
+}
+
+function roundedBox(w, h, d, r) {
+  // RoundedBoxGeometry is NOT vendored (game/vendor holds only the core
+  // three module, no addons/), so build the same shape from core
+  // ExtrudeGeometry: a rounded-rect shape extruded with a bevel.
+  // Built at real size — never a non-uniformly scaled unit box, so the
+  // bevel radius stays exact on every axis. Total size is w x h x d
+  // and the effective corner radius is r (half in the shape, half in
+  // the bevel); bevelSegments 2 per the r9 spec.
+  var b = r / 2;
+  var geo = new THREE.ExtrudeGeometry(roundedRectShape(w - r, h - r, b), {
+    depth: d - r, bevelEnabled: true, bevelThickness: b, bevelSize: b,
+    bevelSegments: 2, curveSegments: 6, steps: 1
+  });
+  geo.translate(0, 0, -(d - r) / 2);
+  return geo;
+}
+
+// One shared radial-gradient blob texture / material / geometry for
+// every ped contact shadow (r9 C4): a soft dark quad under the feet,
+// not a hard-edged disc. Shared, so 86 peds cost no extra textures.
+var blobTexture = null;
+var blobMaterial = null;
+var blobGeometry = null;
+function pedBlobShadow() {
+  if (!blobTexture) {
+    var c = document.createElement('canvas');
+    c.width = 128; c.height = 128;
+    var ctx = c.getContext('2d');
+    var g = ctx.createRadialGradient(64, 64, 4, 64, 64, 62);
+    g.addColorStop(0, 'rgba(0,0,0,0.85)');
+    g.addColorStop(0.55, 'rgba(0,0,0,0.45)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 128, 128);
+    blobTexture = new THREE.CanvasTexture(c);
+  }
+  if (!blobMaterial) {
+    blobMaterial = new THREE.MeshBasicMaterial({
+      map: blobTexture, transparent: true, opacity: 0.35,
+      depthWrite: false, polygonOffset: true,
+      polygonOffsetFactor: -2, polygonOffsetUnits: -2
+    });
+  }
+  if (!blobGeometry) blobGeometry = new THREE.PlaneGeometry(0.85, 0.65);
+  var blob = new THREE.Mesh(blobGeometry, blobMaterial);
+  blob.rotation.x = -Math.PI / 2;
+  blob.position.y = 0.03;
+  return blob;
+}
+
 var WEAPONS = {
   pistol: { len: 0.22, h: 0.05, grip: 0.12 },
   smg: { len: 0.42, h: 0.07, grip: 0.16 },
@@ -93,17 +170,9 @@ export function createPerson(opts) {
   figure.scale.setScalar(scale);
   group.add(figure);
 
-  // Contact shadow under the feet.
-  var blob = new THREE.Mesh(
-    new THREE.CircleGeometry(0.32, 20),
-    new THREE.MeshBasicMaterial({
-      color: 0x000000, transparent: true, opacity: 0.22,
-      depthWrite: false
-    })
-  );
-  blob.rotation.x = -Math.PI / 2;
-  blob.position.y = 0.02;
-  figure.add(blob);
+  // Contact shadow under the feet (r9 C4): a soft radial-gradient
+  // quad, shared texture/material/geometry across all peds.
+  figure.add(pedBlobShadow());
 
   var body = new THREE.Group(); // bobs, leans, crouches, falls
   figure.add(body);
@@ -118,8 +187,10 @@ export function createPerson(opts) {
   var legR = limb(0.075, 0.06, 0.86, pants);
   legR.position.set(0, 0.88, -0.11);
   // Shoes, pointing forward.
-  var shoeMat = mat(o.shoes || '#1a1a1a', 0.6);
-  var shoeL = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.07, 0.11), shoeMat);
+  // Shoes read against the trousers: default brown leather, never the
+  // same near-black as the pants (r9 B5). Officers keep black shoes.
+  var shoeMat = mat(o.shoes || (officer ? '#1a1a1a' : '#6b4226'), 0.6);
+  var shoeL = new THREE.Mesh(roundedBox(0.24, 0.07, 0.11, 0.03), shoeMat);
   shoeL.position.set(0.05, -0.85, 0);
   legL.add(shoeL);
   var shoeR = shoeL.clone();
@@ -127,31 +198,38 @@ export function createPerson(opts) {
   body.add(legL);
   body.add(legR);
 
-  // Torso: jacket with a lighter chest panel.
-  var torso = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.56, 0.44), jacket);
+  // Torso (r9 B5): a capsule, not a box — radius 0.22, cylindrical
+  // section 0.12, total height 0.56, same as the old box. The lighter
+  // chest panel sits just proud of the capsule's front (x 0.22).
+  var torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.12, 4, 12), jacket);
   torso.position.set(0, 1.16, 0);
   body.add(torso);
   var chest = new THREE.Mesh(
-    new THREE.BoxGeometry(0.02, 0.4, 0.3),
+    new THREE.BoxGeometry(0.02, 0.32, 0.3),
     new THREE.MeshStandardMaterial({
       color: 0xffffff, transparent: true, opacity: 0.14,
       roughness: 0.8
     }));
-  chest.position.set(0.14, 1.16, 0);
+  chest.position.set(0.225, 1.24, 0);
   body.add(chest);
+  // Belt line (r9 B5): a dark waistband ring around the capsule for
+  // every ped. Radius 0.225 clears the capsule (~0.205 at this height)
+  // by ~2 cm, so it reads as a belt instead of sinking into the body.
+  var belt = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.225, 0.225, 0.05, 16), mat(0x151515, 0.5));
+  belt.position.set(0, 1.02, 0);
+  body.add(belt);
   if (officer) {
-    // Badge, belt, and a nightstick at the hip read as PVPD.
+    // Badge and a nightstick at the hip read as PVPD (the belt is the
+    // shared waistband above). The badge sits proud of the chest panel.
     var badge = new THREE.Mesh(
       new THREE.BoxGeometry(0.02, 0.06, 0.06),
       new THREE.MeshStandardMaterial({
         color: 0xffd166, metalness: 0.8, roughness: 0.3,
         emissive: 0xffd166, emissiveIntensity: 0.25
       }));
-    badge.position.set(0.14, 1.3, -0.12);
+    badge.position.set(0.24, 1.3, -0.10);
     body.add(badge);
-    var belt = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.05, 0.46), mat(0x151515, 0.5));
-    belt.position.set(0, 0.9, 0);
-    body.add(belt);
     var stick = new THREE.Mesh(
       new THREE.CylinderGeometry(0.025, 0.025, 0.4, 8), mat(0x1a1a1a, 0.5));
     stick.position.set(-0.05, 0.72, -0.26);
@@ -159,11 +237,15 @@ export function createPerson(opts) {
     body.add(stick);
   }
 
-  // Arms, pivoted at the shoulders (y 1.40).
-  var armL = limb(0.055, 0.048, 0.6, jacket);
-  armL.position.set(0, 1.40, 0.26);
-  var armR = limb(0.055, 0.048, 0.6, jacket);
-  armR.position.set(0, 1.40, -0.26);
+  // Arms (r9 B5): capsules, pivoted at the shoulders (y 1.40) — the
+  // rounded top reads as a shoulder. z ±0.24 (was ±0.26): the capsule
+  // torso narrows toward the shoulders, so the arms sit closer in.
+  // Same 0.60 m total length and same pivots, so the walk/aim rig
+  // and the hand/weapon attach points are unchanged.
+  var armL = capsuleLimb(0.055, 0.49, jacket);
+  armL.position.set(0, 1.40, 0.24);
+  var armR = capsuleLimb(0.055, 0.49, jacket);
+  armR.position.set(0, 1.40, -0.24);
   var handL = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 8), skin);
   handL.position.y = -0.62;
   armL.add(handL);

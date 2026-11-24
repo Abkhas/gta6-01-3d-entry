@@ -454,8 +454,7 @@
   // Fill a rect with softly rounded corners (radius clamped to the
   // rect's smaller side) so blocks and bars read as smooth shapes,
   // not hard-edged pixels.
-  function fillRoundRect(ctx, x, y, w, h, r) {
-    if (w <= 0 || h <= 0) return;
+  function roundRectPath(ctx, x, y, w, h, r) {
     var rr = Math.max(0, Math.min(r, w / 2, h / 2));
     ctx.beginPath();
     ctx.moveTo(x + rr, y);
@@ -468,7 +467,117 @@
     ctx.lineTo(x, y + rr);
     ctx.arcTo(x, y, x + rr, y, rr);
     ctx.closePath();
+  }
+
+  function fillRoundRect(ctx, x, y, w, h, r) {
+    if (w <= 0 || h <= 0) return;
+    roundRectPath(ctx, x, y, w, h, r);
     ctx.fill();
+  }
+
+  function strokeRoundRect(ctx, x, y, w, h, r) {
+    if (w <= 0 || h <= 0) return;
+    roundRectPath(ctx, x, y, w, h, r);
+    ctx.stroke();
+  }
+
+  // ---- r9 realism palette (D3) --------------------------------------
+  // Muted SA colours: olive-green ground, warm sand, deeper water.
+  // The r8 saturated green (#5c8a3d) shouted; the olive reads as
+  // terrain at 230x172 without drifting to GTA V grey.
+  var MAP_COLORS = {
+    ground: '#6d8a4a', groundAlt: '#74904f', groundAlt2: '#7a9155',
+    water: '#6f97b8', shoreline: '#a8c8de',
+    sand: '#e8cf8a', wetSand: '#c9a95e',
+    building: '#f4f4f0', buildingOutline: 'rgba(60,60,55,0.55)',
+    blockEdge: '#59763a', blockHi: 'rgba(255,255,255,0.14)',
+    road: '#0d0d0d', casing: '#2e2e2e',
+    highwayCasing: '#57503c', highwayEdge: '#8a7a4a'
+  };
+
+  // Deterministic 64x64 grain tile (LCG, fixed seed so screenshots
+  // are reproducible), drawn at 3% opacity over the baked static
+  // layer — texture without a per-frame cost (D2).
+  var mapNoisePattern = null;
+  function mapNoise(ctx) {
+    if (mapNoisePattern) return mapNoisePattern;
+    try {
+      if (typeof document === 'undefined' || !document.createElement) return null;
+      var c = document.createElement('canvas');
+      c.width = 64; c.height = 64;
+      var nctx = c.getContext('2d');
+      if (!nctx) return null;
+      var img = nctx.createImageData(64, 64);
+      var seed = 1234567;
+      for (var i = 0; i < img.data.length; i += 4) {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        var v = 118 + (seed % 21) - 10; // mid-grey speckle +/-10
+        img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v; img.data[i + 3] = 255;
+      }
+      nctx.putImageData(img, 0, 0);
+      mapNoisePattern = ctx.createPattern(c, 'repeat');
+      return mapNoisePattern;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // Night factor for the map (D5): 0 by day, 1 at deep night.
+  // Prefers an explicit state.nightF (test hook / future main3d
+  // wiring), then the live day/night system the game already exposes
+  // at window.__palma3d.daynight.stars (r8 wired the same value for
+  // traffic-light halos), then a clock fallback.
+  function nightFactor(state) {
+    if (state && typeof state.nightF === 'number') return clamp(state.nightF, 0, 1);
+    try {
+      var dn = (typeof window !== 'undefined' && window.__palma3d) ? window.__palma3d.daynight : null;
+      if (dn && typeof dn.stars === 'number') return clamp(dn.stars, 0, 1);
+    } catch (e) { /* fall through to the clock */ }
+    var mins = (state && typeof state.clockMinutes === 'number') ? state.clockMinutes : 720;
+    var h = ((mins / 60) % 24 + 24) % 24;
+    if (h >= 20 || h < 5) return 1;
+    if (h >= 18 && h < 20) return (h - 18) / 2;
+    if (h >= 5 && h < 7) return (7 - h) / 2;
+    return 0;
+  }
+
+  // Night-mode map (D5): a cool dark-blue wash over the static layer
+  // only (labels, POIs, route and bars draw after, so they stay
+  // bright), then the highway centre lines re-stroked brighter so
+  // roads stay readable. Only when nightF > 0.5; capped at ~35%
+  // darkening so the map never goes void.
+  function applyNightMap(ctx, W, mapH, nightF, mx, mz, c3, city) {
+    if (!(nightF > 0.5)) return;
+    var a = 0.35 * clamp((nightF - 0.5) * 2, 0, 1); // 0 at dusk, 0.35 deep night
+    ctx.save();
+    ctx.fillStyle = 'rgba(12,22,52,' + a.toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, mapH);
+    ctx.restore();
+    if (!city) return;
+    var avenues = city.avenues || [];
+    var streets = city.streets || [];
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,' + (0.55 + 0.35 * nightF).toFixed(2) + ')';
+    ctx.lineWidth = 1.5;
+    for (var i = 0; i < avenues.length; i++) {
+      if (c3 && avenues[i] === c3.HIGHWAY_EAST_X) {
+        var ax = mx(avenues[i]);
+        ctx.beginPath();
+        ctx.moveTo(ax + 0.5, 0);
+        ctx.lineTo(ax + 0.5, mapH);
+        ctx.stroke();
+      }
+    }
+    for (var j = 0; j < streets.length; j++) {
+      if (c3 && streets[j] === c3.HIGHWAY_NORTH_Z) {
+        var sz = mz(streets[j]);
+        ctx.beginPath();
+        ctx.moveTo(0, sz + 0.5);
+        ctx.lineTo(W, sz + 0.5);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
   }
 
   function mapBounds(city) {
@@ -505,24 +614,37 @@
   // never changes while the city object is the same. (ctx, W, mapH
   // are CSS-pixel layout coords; the caller sets the transform.)
   //
-  // SA STYLE (r8): the palette speaks San Andreas — green blocks,
-  // white buildings, black roads, blue water, yellow sand — painted
-  // over OUR city geometry. No SA art, no SA names, no SA map data:
-  // only the colour language. The world->map transform and every
-  // position on the map are byte-identical to r7; only colours change.
+  // SA STYLE (r8, muted r9 — see MAP_COLORS): the palette speaks San
+  // Andreas — olive-green blocks, white buildings, black roads with
+  // dark casing, blue water, warm sand — painted over OUR city
+  // geometry. No SA art, no SA names, no SA map data: only the colour
+  // language. The world->map transform and every position on the map
+  // are byte-identical to r7; only colours change.
   function drawMinimapStatic(ctx, W, mapH, b, mx, mz, c3, shoreX, sandX, city, districts) {
-    ctx.fillStyle = '#5c8a3d';
+    ctx.fillStyle = MAP_COLORS.ground;
     ctx.fillRect(0, 0, W, mapH);
-    // Ocean, then the sand band, along the west edge.
-    ctx.fillStyle = '#7a9cc6';
+    // Ocean, then the sand band, along the west edge. A darker wet
+    // edge marks the waterline (r9 D3) and a 1 px lighter stroke is
+    // the shoreline itself.
+    ctx.fillStyle = MAP_COLORS.water;
     ctx.fillRect(0, 0, Math.max(0, mx(shoreX)), mapH);
-    ctx.fillStyle = '#e3c878';
+    ctx.fillStyle = MAP_COLORS.sand;
     ctx.fillRect(Math.max(0, mx(shoreX)), 0, Math.max(0, mx(sandX) - mx(shoreX)), mapH);
+    ctx.fillStyle = MAP_COLORS.wetSand;
+    ctx.fillRect(Math.max(0, mx(shoreX)), 0, 2, mapH);
+    ctx.strokeStyle = MAP_COLORS.shoreline;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(mx(shoreX) + 0.5, 0);
+    ctx.lineTo(mx(shoreX) + 0.5, mapH);
+    ctx.stroke();
 
     // City blocks: real building footprints when the city adapter
     // carries them, otherwise the block cells of the road grid.
     // SA language: white buildings on green blocks, so the map reads
-    // as streets at a glance.
+    // as streets at a glance. r9 D2: buildings are rounded rects
+    // (radius 1-2 px) with a 0.5 px grey outline so adjacent white
+    // buildings don't merge into one blob.
     var avenues = (city && city.avenues) || [];
     var streets = (city && city.streets) || [];
     var buildings = (city && city.buildings) || [];
@@ -532,8 +654,11 @@
         var bx0 = mx(bd.x0), bz0 = mz(bd.z0 !== undefined ? bd.z0 : bd.y0);
         var bx1 = mx(bd.x1), bz1 = mz(bd.z1 !== undefined ? bd.z1 : bd.y1);
         if (bx1 < 0 || bz1 < 0 || bx0 > W || bz0 > mapH) continue;
-        ctx.fillStyle = '#f4f4f0';
-        fillRoundRect(ctx, bx0, bz0, Math.max(1, bx1 - bx0), Math.max(1, bz1 - bz0), 1);
+        ctx.fillStyle = MAP_COLORS.building;
+        fillRoundRect(ctx, bx0, bz0, Math.max(1, bx1 - bx0), Math.max(1, bz1 - bz0), 2);
+        ctx.strokeStyle = MAP_COLORS.buildingOutline;
+        ctx.lineWidth = 0.5;
+        strokeRoundRect(ctx, bx0, bz0, Math.max(1, bx1 - bx0), Math.max(1, bz1 - bz0), 2);
       }
     } else {
       for (var gx = 0; gx + 1 < avenues.length; gx++) {
@@ -541,29 +666,55 @@
           var cx0 = mx(avenues[gx]) + 1.5, cz0 = mz(streets[gz]) + 1.5;
           var cx1 = mx(avenues[gx + 1]) - 1.5, cz1 = mz(streets[gz + 1]) - 1.5;
           if (cx1 <= cx0 || cz1 <= cz0) continue;
-          ctx.fillStyle = ((gx + gz) % 2 === 0) ? '#63913f' : '#6a9a44';
-          fillRoundRect(ctx, cx0, cz0, cx1 - cx0, cz1 - cz0, 1);
+          ctx.fillStyle = ((gx + gz) % 2 === 0) ? MAP_COLORS.groundAlt : MAP_COLORS.groundAlt2;
+          fillRoundRect(ctx, cx0, cz0, cx1 - cx0, cz1 - cz0, 2.5);
+          // 1 px darker edge + a 1 px inner highlight on the top and
+          // left edges: a fake bevel, so the block reads drawn, not
+          // plotted (r9 D2).
+          ctx.strokeStyle = MAP_COLORS.blockEdge;
+          ctx.lineWidth = 1;
+          strokeRoundRect(ctx, cx0, cz0, cx1 - cx0, cz1 - cz0, 2.5);
+          ctx.strokeStyle = MAP_COLORS.blockHi;
+          ctx.beginPath();
+          ctx.moveTo(cx0 + 2, cz0 + 0.5);
+          ctx.lineTo(cx1 - 2, cz0 + 0.5);
+          ctx.moveTo(cx0 + 0.5, cz0 + 2);
+          ctx.lineTo(cx0 + 0.5, cz1 - 2);
+          ctx.stroke();
         }
       }
     }
     // District tints: each district's own accent colour at low alpha,
     // under the roads — the stats-map colour-coding (brown/tan/blue),
-    // so the minimap reads as districts, not a grid.
+    // so the minimap reads as districts, not a grid. r9 D3: a very
+    // subtle per-district lightness shift (+3% even, -3% odd) so
+    // districts read without labels.
     for (var d = 0; d < districts.length; d++) {
       var dist = districts[d];
       var x0 = dist.x0, z0 = (dist.z0 !== undefined ? dist.z0 : dist.y0);
       var x1 = dist.x1, z1 = (dist.z1 !== undefined ? dist.z1 : dist.y1);
       ctx.fillStyle = (dist.accent || '#ffd166') + '2e';
       fillRoundRect(ctx, mx(x0), mz(z0), mx(x1) - mx(x0), mz(z1) - mz(z0), 2);
+      ctx.fillStyle = (d % 2 === 0) ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)';
+      fillRoundRect(ctx, mx(x0), mz(z0), mx(x1) - mx(x0), mz(z1) - mz(z0), 2);
     }
-    // Roads: black bands, SA style. Ordinary streets are solid
-    // black; the two highways run thicker with a thin white centre
-    // line, so they still read as freeways. No pale centre lines on
-    // ordinary roads — the black-on-green is the SA look.
+    // Roads, r9 D1: casing + fill. Every road is stroked twice —
+    // first a wider stroke in a dark casing colour, then the road
+    // fill on top — so roads stop bleeding into the green blocks and
+    // junctions read as connected. Highways get a lighter, warmer
+    // casing plus a thin coloured edge. Ordinary roads keep a solid
+    // black fill (no pale centre line — the SA look); the two
+    // highways keep a thin white centre line.
     for (var a = 0; a < avenues.length; a++) {
       var ax = mx(avenues[a]);
       var wideA = !!(c3 && avenues[a] === c3.HIGHWAY_EAST_X);
-      ctx.strokeStyle = '#0d0d0d';
+      ctx.strokeStyle = wideA ? MAP_COLORS.highwayCasing : MAP_COLORS.casing;
+      ctx.lineWidth = wideA ? 7 : 5;
+      ctx.beginPath();
+      ctx.moveTo(ax, 0);
+      ctx.lineTo(ax, mapH);
+      ctx.stroke();
+      ctx.strokeStyle = MAP_COLORS.road;
       ctx.lineWidth = wideA ? 5 : 3;
       ctx.beginPath();
       ctx.moveTo(ax, 0);
@@ -576,12 +727,28 @@
         ctx.moveTo(ax + 0.5, 0);
         ctx.lineTo(ax + 0.5, mapH);
         ctx.stroke();
+        ctx.strokeStyle = MAP_COLORS.highwayEdge;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(ax - 3, 0);
+        ctx.lineTo(ax - 3, mapH);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(ax + 3, 0);
+        ctx.lineTo(ax + 3, mapH);
+        ctx.stroke();
       }
     }
     for (var s = 0; s < streets.length; s++) {
       var sz = mz(streets[s]);
       var wideS = !!(c3 && streets[s] === c3.HIGHWAY_NORTH_Z);
-      ctx.strokeStyle = '#0d0d0d';
+      ctx.strokeStyle = wideS ? MAP_COLORS.highwayCasing : MAP_COLORS.casing;
+      ctx.lineWidth = wideS ? 7 : 5;
+      ctx.beginPath();
+      ctx.moveTo(0, sz);
+      ctx.lineTo(W, sz);
+      ctx.stroke();
+      ctx.strokeStyle = MAP_COLORS.road;
       ctx.lineWidth = wideS ? 5 : 3;
       ctx.beginPath();
       ctx.moveTo(0, sz);
@@ -594,11 +761,27 @@
         ctx.moveTo(0, sz + 0.5);
         ctx.lineTo(W, sz + 0.5);
         ctx.stroke();
+        ctx.strokeStyle = MAP_COLORS.highwayEdge;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, sz - 3);
+        ctx.lineTo(W, sz - 3);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(0, sz + 3);
+        ctx.lineTo(W, sz + 3);
+        ctx.stroke();
       }
     }
     if (city && typeof city.beachRoadX === 'number') {
       var brx = mx(city.beachRoadX);
-      ctx.strokeStyle = '#0d0d0d';
+      ctx.strokeStyle = MAP_COLORS.casing;
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(brx, 0);
+      ctx.lineTo(brx, mapH);
+      ctx.stroke();
+      ctx.strokeStyle = MAP_COLORS.road;
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(brx, 0);
@@ -629,6 +812,17 @@
         ctx.arc(lx, ly, 3, 0, Math.PI * 2);
         ctx.fill();
       }
+    }
+    // Grain (r9 D2): a 3% opacity noise pattern over the baked
+    // static layer. It is painted here, once, into the cached
+    // offscreen canvas — never per frame.
+    var pat = mapNoise(ctx);
+    if (pat) {
+      ctx.save();
+      ctx.globalAlpha = 0.03;
+      ctx.fillStyle = pat;
+      ctx.fillRect(0, 0, W, mapH);
+      ctx.restore();
     }
   }
 
@@ -690,11 +884,20 @@
     });
   }
 
+  // The radar shows only the essential POIs (r9 D4 declutter):
+  // hospital, garage and food. Clothing, gym and spray shop stay
+  // on the full map (M), where there is room for all of them.
+  var MINIMAP_POI = { hospital: true, garage: true, burger: true };
+
   // One POI glyph at map point (x, y), disc radius r. Glyphs are
   // drawn in unit space (-1..1) so the same painter serves the radar
   // (r 7) and the full map (r 13). A dark disc backs every glyph so
   // it reads over white buildings; the hospital is the exception — a
   // white disc with a red cross, the universal hospital mark.
+  // r9 D4: every POI type is a DISTINCT shape (hospital = cross,
+  // garage = wrench, food = burger, clothing = hanger), each filled
+  // white and stroked with a 1 px dark outline so it stays crisp at
+  // radar size.
   function drawPoiIcon(ctx, x, y, r, kind) {
     ctx.save();
     ctx.translate(x, y);
@@ -724,65 +927,85 @@
     ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.stroke();
     ctx.scale(r, r);
-    ctx.fillStyle = '#ffffff';
-    ctx.strokeStyle = '#ffffff';
     if (kind === 'clothing') {
-      // T-shirt: body, sleeves, collar.
+      // Hanger: hook arc + triangular body, stroked white (a filled
+      // triangle would read as a solid pennant, not a hanger).
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 0.16;
+      ctx.lineJoin = 'round';
       ctx.beginPath();
-      ctx.moveTo(-0.45, -0.55);
-      ctx.lineTo(-0.85, -0.35);
-      ctx.lineTo(-0.6, 0.05);
-      ctx.lineTo(-0.45, -0.05);
-      ctx.lineTo(-0.45, 0.6);
-      ctx.lineTo(0.45, 0.6);
-      ctx.lineTo(0.45, -0.05);
-      ctx.lineTo(0.6, 0.05);
-      ctx.lineTo(0.85, -0.35);
-      ctx.lineTo(0.45, -0.55);
-      ctx.quadraticCurveTo(0, -0.25, -0.45, -0.55);
+      ctx.arc(0, -0.42, 0.16, Math.PI * 0.9, Math.PI * 2.05);
+      ctx.moveTo(0, -0.26);
+      ctx.lineTo(0, -0.1);
+      ctx.lineTo(-0.68, 0.5);
+      ctx.lineTo(0.68, 0.5);
       ctx.closePath();
-      ctx.fill();
-    } else if (kind === 'gym') {
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+    // Every other glyph is one canvas path: white fill + 1 px dark
+    // outline (1/r in unit space = 1 device px after the scale).
+    // fill() leaves the current path intact, so stroke() outlines
+    // exactly the same shape — no Path2D needed (the Node self-test
+    // has no Path2D global).
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 1 / r;
+    ctx.lineJoin = 'round';
+    if (kind === 'gym') {
       // Dumbbell: two plates and a bar.
-      ctx.fillRect(-0.85, -0.5, 0.28, 1.0);
-      ctx.fillRect(0.57, -0.5, 0.28, 1.0);
-      ctx.fillRect(-0.57, -0.16, 1.14, 0.32);
+      ctx.beginPath();
+      ctx.rect(-0.85, -0.5, 0.28, 1.0);
+      ctx.rect(0.57, -0.5, 0.28, 1.0);
+      ctx.rect(-0.57, -0.16, 1.14, 0.32);
+      ctx.fill();
+      ctx.stroke();
     } else if (kind === 'spray') {
       // Spray can: body, nozzle, three spray dots.
-      ctx.fillRect(-0.42, -0.05, 0.84, 0.65);
-      ctx.fillRect(-0.14, -0.4, 0.28, 0.35);
       ctx.beginPath();
+      ctx.rect(-0.42, -0.05, 0.84, 0.65);
+      ctx.rect(-0.14, -0.4, 0.28, 0.35);
       ctx.arc(-0.3, -0.62, 0.09, 0, Math.PI * 2);
       ctx.arc(0.05, -0.72, 0.09, 0, Math.PI * 2);
       ctx.arc(0.38, -0.58, 0.09, 0, Math.PI * 2);
       ctx.fill();
+      ctx.stroke();
     } else if (kind === 'burger') {
       // Burger: top bun, patty, bottom bun, dark gaps between.
       ctx.beginPath();
       ctx.arc(0, 0.12, 0.62, Math.PI, 0);
       ctx.closePath();
+      ctx.rect(-0.62, 0.22, 1.24, 0.18);
+      ctx.rect(-0.55, 0.5, 1.1, 0.16);
       ctx.fill();
-      ctx.fillRect(-0.62, 0.22, 1.24, 0.18);
-      ctx.fillRect(-0.55, 0.5, 1.1, 0.16);
+      ctx.stroke();
     } else if (kind === 'garage') {
-      // Garage: pitched roof, body, dark door.
+      // Wrench (spanner): open jaw on top, handle below, tilted so
+      // the jaw reads at radar size.
+      ctx.rotate(-0.6);
       ctx.beginPath();
-      ctx.moveTo(-0.7, -0.05);
-      ctx.lineTo(0, -0.65);
-      ctx.lineTo(0.7, -0.05);
-      ctx.lineTo(0.55, -0.05);
-      ctx.lineTo(0.55, 0.6);
-      ctx.lineTo(-0.55, 0.6);
-      ctx.lineTo(-0.55, -0.05);
+      ctx.arc(0, -0.5, 0.34, 0, Math.PI * 2);
+      ctx.rect(-0.13, -0.3, 0.26, 1.05);
+      ctx.fill();
+      ctx.stroke();
+      // Open jaw: cut the top of the head back out in the disc
+      // colour so the wrench reads as open-ended, not a lollipop.
+      ctx.fillStyle = 'rgba(10,14,10,0.78)';
+      ctx.beginPath();
+      ctx.moveTo(0, -0.5);
+      ctx.lineTo(0.34, -1.02);
+      ctx.lineTo(-0.34, -1.02);
       ctx.closePath();
       ctx.fill();
-      ctx.fillStyle = '#0a0e0a';
-      ctx.fillRect(-0.3, 0.08, 0.6, 0.52);
+      ctx.restore();
+      return;
     } else {
       // Unknown kind: plain dot, never invisible.
       ctx.beginPath();
       ctx.arc(0, 0, 0.3, 0, Math.PI * 2);
       ctx.fill();
+      ctx.stroke();
     }
     ctx.restore();
   }
@@ -823,12 +1046,20 @@
 
     // Static layer: pre-rendered once per city, blitted each frame;
     // falls back to an inline draw when no offscreen canvas exists.
+    // (Verified r9: the minimap does NOT re-paint the static layer
+    // per frame — minimapStaticCanvas returns the cached canvas while
+    // the city object is the same, so this is one drawImage.)
     var staticCanvas = minimapStaticCanvas(city, W, mapH, b, mx, mz, c3, shoreX, sandX, districts);
     if (staticCanvas) {
       ctx.drawImage(staticCanvas, 0, 0, W, mapH);
     } else {
       drawMinimapStatic(ctx, W, mapH, b, mx, mz, c3, shoreX, sandX, city, districts);
     }
+
+    // Night mode (r9 D5): darkens the static layer only; labels,
+    // POIs, route and bars draw after and stay bright.
+    var nightF = nightFactor(state);
+    applyNightMap(ctx, W, mapH, nightF, mx, mz, c3, city);
 
     // District labels: drawn per frame after the downscale, in a real
     // font at 10px CSS, so they stay crisp — never baked into the
@@ -852,10 +1083,23 @@
     ctx.textAlign = 'left';
 
     // Points of interest: SA-style canvas glyphs on our own city
-    // spots (see POIS). Drawn under the route and blips.
+    // spots (see POIS). Drawn under the route and blips. The radar
+    // shows only the essential POIs (r9 D4 declutter); at night each
+    // shown icon gets a faint warm halo so lit POIs read brighter.
     var pois = poiList(city);
     for (var pi = 0; pi < pois.length; pi++) {
-      drawPoiIcon(ctx, mx(pois[pi].x), mz(pois[pi].z), 7, pois[pi].kind);
+      if (!MINIMAP_POI[pois[pi].kind]) continue;
+      var pix = mx(pois[pi].x), piy = mz(pois[pi].z);
+      if (nightF > 0.5) {
+        var halo = ctx.createRadialGradient(pix, piy, 2, pix, piy, 16);
+        halo.addColorStop(0, 'rgba(255,214,110,' + (0.22 * nightF).toFixed(2) + ')');
+        halo.addColorStop(1, 'rgba(255,214,110,0)');
+        ctx.fillStyle = halo;
+        ctx.beginPath();
+        ctx.arc(pix, piy, 16, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      drawPoiIcon(ctx, pix, piy, 7, pois[pi].kind);
     }
 
     // Route: a solid gold line with a pale casing, player to the
@@ -895,6 +1139,30 @@
       ctx.fillRect(-6, -6, 12, 12);
       ctx.strokeRect(-6, -6, 12, 12);
       ctx.restore();
+      // Rim arrow (r9 D4): the waypoint is off the radar — point at
+      // it from the panel rim instead of letting the route run off
+      // blind. Clamp the target onto the rim, 10 px inside the edge,
+      // and draw a gold arrow pointing out toward it.
+      if (tx < 0 || tx > W || ty < 0 || ty > mapH) {
+        var rcx = W / 2, rcy = mapH / 2;
+        var rdx = tx - rcx, rdy = ty - rcy;
+        var rm = Math.max(Math.abs(rdx) / (W / 2 - 10), Math.abs(rdy) / (mapH / 2 - 10));
+        var rx = rcx + rdx / rm, ry = rcy + rdy / rm;
+        ctx.save();
+        ctx.translate(rx, ry);
+        ctx.rotate(Math.atan2(rdy, rdx));
+        ctx.fillStyle = '#ffc21c';
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(9, 0);
+        ctx.lineTo(-6, -6);
+        ctx.lineTo(-6, 6);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
     }
     // Police blips: red dots with a white ring, pulsing while wanted.
     // The heli reads as a red ring with a red centre.
@@ -931,10 +1199,14 @@
     // Player arrow: white, dark-outlined, pointing where Rey heads.
     // SA style — the arrow rotates with the facing, the map stays
     // north-up. Same shape and size as r7, only the colours change.
+    // r9 D4: a thin direction tick past the tip, and a subtle pulse
+    // (scale) while wanted.
     var ang = (p.vehicle ? p.vehicle.angle : p.angle) || 0;
+    var arrowPulse = wanted > 0 ? 1 + 0.07 * pulse : 1;
     ctx.save();
     ctx.translate(mx(p.x), mz(pz));
     ctx.rotate(ang);
+    ctx.scale(arrowPulse, arrowPulse);
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = '#111111';
     ctx.lineWidth = 1.5;
@@ -945,6 +1217,18 @@
     ctx.lineTo(-8, 7);
     ctx.closePath();
     ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(11, 0);
+    ctx.lineTo(16, 0);
+    ctx.stroke();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(11, 0);
+    ctx.lineTo(16, 0);
     ctx.stroke();
     ctx.restore();
 
@@ -1033,6 +1317,11 @@
       drawMinimapStatic(ctx, W, H, b, mx, mz, c3, shoreX, sandX, city, districts);
     }
 
+    // Night mode (r9 D5), same as the radar: the static layer dims,
+    // everything dynamic stays bright.
+    var nightF = nightFactor(state);
+    applyNightMap(ctx, W, H, nightF, mx, mz, c3, city);
+
     // District labels, large, white with a dark outline.
     ctx.fillStyle = 'rgba(255,255,255,0.95)';
     ctx.strokeStyle = 'rgba(0,0,0,0.7)';
@@ -1050,13 +1339,23 @@
     }
 
     // POI icons with names. The name goes right of the icon, or left
-    // when the icon sits near the right edge.
+    // when the icon sits near the right edge. The full map shows ALL
+    // POIs (r9 D4 declutter applies to the radar only).
     ctx.font = 'bold 11px system-ui, sans-serif';
     ctx.textAlign = 'left';
     var pois = poiList(city);
     for (var pi = 0; pi < pois.length; pi++) {
       var poi = pois[pi];
       var px = mx(poi.x), py = mz(poi.z);
+      if (nightF > 0.5) {
+        var fhalo = ctx.createRadialGradient(px, py, 3, px, py, 30);
+        fhalo.addColorStop(0, 'rgba(255,214,110,' + (0.22 * nightF).toFixed(2) + ')');
+        fhalo.addColorStop(1, 'rgba(255,214,110,0)');
+        ctx.fillStyle = fhalo;
+        ctx.beginPath();
+        ctx.arc(px, py, 30, 0, Math.PI * 2);
+        ctx.fill();
+      }
       drawPoiIcon(ctx, px, py, 13, poi.kind);
       ctx.strokeStyle = 'rgba(0,0,0,0.75)';
       ctx.lineWidth = 3;
@@ -1132,7 +1431,8 @@
       }
     }
 
-    // Player arrow, white, larger than the radar's, rotating.
+    // Player arrow, white, larger than the radar's, rotating, with
+    // the same direction tick as the radar (r9 D4).
     var ang = (p.vehicle ? p.vehicle.angle : p.angle) || 0;
     ctx.save();
     ctx.translate(mx(p.x), mz(pz));
@@ -1147,6 +1447,18 @@
     ctx.lineTo(-13, 11);
     ctx.closePath();
     ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 3.5;
+    ctx.beginPath();
+    ctx.moveTo(18, 0);
+    ctx.lineTo(25, 0);
+    ctx.stroke();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(18, 0);
+    ctx.lineTo(25, 0);
     ctx.stroke();
     ctx.restore();
 
@@ -1481,7 +1793,7 @@
       '.pv3d-clock{padding:6px 8px}',
       '.pv3d-clock-line{font-size:15px;font-weight:700;color:#fff}',
       '.pv3d-radio-line{font-size:12px;color:#ffd166;margin-top:4px;white-space:nowrap;overflow:hidden}',
-      '.pv3d-minimap-wrap{position:absolute}',
+      '.pv3d-minimap-wrap{position:absolute;box-shadow:0 4px 16px rgba(0,0,0,0.55)}',
       '.pv3d-minimap{display:block;background:rgba(8,18,14,0.8)}',
       '.pv3d-minimap-chip{position:absolute;left:4px;top:4px;background:rgba(8,12,18,0.85);color:#ffd166;font-size:10px;font-weight:700;padding:2px 6px}',
       '.pv3d-minimap-compass{position:absolute;right:6px;top:4px;color:#fff;font-size:11px;font-weight:700;text-shadow:0 1px 2px #000,0 0 3px #000}',
