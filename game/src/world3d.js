@@ -1497,22 +1497,38 @@ export function buildWorld(scene, CFG = CFG3D) {
     }
   }
 
-  // ---- palms ---------------------------------------------------------------
-  // Instanced trunks + instanced crowns: cheap at a few hundred palms.
-  const palmSpots = [];
+  // ---- trees (r12) ---------------------------------------------------------
+  // R12: the old single flattened sphere on a stick read as a lollipop.
+  // Research (low-poly tree guides: the crown decides the look — an oak
+  // crowds overlapping spheres into a broad crown, a pine stacks cones,
+  // a birch scatters sparse blobs; every guide stresses layered clusters
+  // + varied scale/shade, never one sphere) says the fix is clustered
+  // overlapping canopy blobs, never one sphere. Two kinds, both
+  // instanced (6 draw calls total, was 2 — still trivial):
+  // beach palms — tall thin trunk + 7 drooping fronds + a heart cluster;
+  // street/lot trees — tapered trunk + 3 overlapping foliage blobs in
+  // varied greens and sizes. One dedicated RNG stream (0x7e55), so no
+  // existing layout — buildings, roads, lamps — shifts by a single draw.
+  const rngTree = mulberry32(20261124 ^ 0x7e55);
+  const palmSpots = [];   // every tree (returned: main3d prop obstacles)
+  const beachSpots = [];  // palms — frond crowns
+  const treeSpots = [];   // broadleaf — blob-cluster crowns
   // R7: beach palms denser (every ~24 m, was 70) — the beach is a hero
   // shot and the research asks for palms every ~12 m.
   for (let z = -HALF + 60; z <= HALF - 60; z += 24) {
-    palmSpots.push([CFG.BEACH_X - 40 - rng() * 90, z + (rng() - 0.5) * 30]);
+    const s = [CFG.BEACH_X - 40 - rng() * 90, z + (rng() - 0.5) * 30];
+    palmSpots.push(s); beachSpots.push(s);
   }
   for (let z = -HALF + 100; z <= HALF - 100; z += 260) {
-    palmSpots.push([-HALF + 40 + rng() * 40, z]);
+    const s = [-HALF + 40 + rng() * 40, z];
+    palmSpots.push(s); treeSpots.push(s);
   }
   for (let i = 0; i < 60; i++) {
     const c = roadCentres[Math.floor(rng() * roadCentres.length)];
     const t = -HALF + rng() * HALF * 2;
     if (Math.abs(c - HW_E) < 40 || Math.abs(t - HW_N) < 40) continue;
-    palmSpots.push([c + ROAD_W / 2 + 6, t]);
+    const s = [c + ROAD_W / 2 + 6, t];
+    palmSpots.push(s); treeSpots.push(s);
   }
   // R7: street trees — one side of every street, ~60 m apart (research
   // asks 12–18 m; 60 m keeps the streets readable), skipping junctions
@@ -1523,35 +1539,138 @@ export function buildWorld(scene, CFG = CFG3D) {
       if (Math.abs(t - HW_N) < 30 || Math.abs(t - HW_E) < 30) continue;
       if (roadCentres.some((rc) => Math.abs(t - rc) < 20)) continue; // junction — keep the crossing clear
       const side = (Math.floor(t / 60) % 2 === 0) ? 1 : -1;
-      palmSpots.push([c + side * (ROAD_W / 2 + 6), t]);
-      palmSpots.push([t, c + side * (ROAD_W / 2 + 6)]);
+      const s1 = [c + side * (ROAD_W / 2 + 6), t];
+      const s2 = [t, c + side * (ROAD_W / 2 + 6)];
+      palmSpots.push(s1, s2); treeSpots.push(s1, s2);
     }
   }
-  for (const s of lotTreeSpots) palmSpots.push(s);
-  const trunkGeo = new THREE.CylinderGeometry(0.45, 0.8, 9, 7);
-  const trunkMat = new THREE.MeshStandardMaterial({ color: '#6b4a2c', roughness: 1 });
+  for (const s of lotTreeSpots) { palmSpots.push(s); treeSpots.push(s); }
+
+  // Trunks: one instanced tapered cylinder (unit height, scaled per
+  // tree) for both kinds — palms tall/thin, broadleaf shorter/stouter,
+  // each with its own lean and brown. The top of a leaning trunk is
+  // (x - leanZ*h, h, z + leanX*h) for small angles; the canopy sits there.
+  const trunkGeo = new THREE.CylinderGeometry(0.32, 0.78, 1, 7);
+  const trunkMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1 });
   const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, palmSpots.length);
-  const crownGeo = new THREE.SphereGeometry(3.4, 8, 6);
-  crownGeo.scale(1, 0.45, 1);
-  const crownMat = new THREE.MeshStandardMaterial({ color: '#2e6b34', roughness: 1 });
-  const crowns = new THREE.InstancedMesh(crownGeo, crownMat, palmSpots.length);
-  palmSpots.forEach(([x, z], i) => {
-    const lean = (rng() - 0.5) * 0.14;
-    dummy.position.set(x, 4.5, z);
-    dummy.rotation.set(lean, rng() * Math.PI * 2, (rng() - 0.5) * 0.14);
+  const tmpColor = new THREE.Color();
+  const trunkTops = new Map(); // index -> [topX, topY, topZ, scale]
+  let ti = 0;
+  function addTrunk(x, z, isPalm) {
+    const h = isPalm ? 10 + rngTree() * 3 : 6 + rngTree() * 3.5;
+    const rs = isPalm ? 0.75 + rngTree() * 0.2 : 1.0 + rngTree() * 0.35;
+    const leanX = (rngTree() - 0.5) * 0.14;
+    const leanZ = (rngTree() - 0.5) * 0.14;
+    dummy.position.set(x, h / 2, z);
+    dummy.rotation.set(leanX, rngTree() * Math.PI * 2, leanZ);
+    dummy.scale.set(rs, h, rs);
     dummy.updateMatrix();
-    trunks.setMatrixAt(i, dummy.matrix);
-    dummy.position.set(x + lean * 20, 9.6, z);
-    dummy.rotation.set(0, rng() * Math.PI * 2, 0);
-    dummy.updateMatrix();
-    crowns.setMatrixAt(i, dummy.matrix);
-  });
+    trunks.setMatrixAt(ti, dummy.matrix);
+    if (isPalm) tmpColor.setHSL(0.08, 0.32, 0.30 + rngTree() * 0.10);
+    else tmpColor.setHSL(0.07, 0.42, 0.20 + rngTree() * 0.10);
+    trunks.setColorAt(ti, tmpColor);
+    trunkTops.set(ti, [x - leanZ * h, h, z + leanX * h, isPalm ? 1 : 0.8 + rngTree() * 0.55]);
+    ti++;
+  }
+  beachSpots.forEach(([x, z]) => addTrunk(x, z, true));
+  treeSpots.forEach(([x, z]) => addTrunk(x, z, false));
   trunks.instanceMatrix.needsUpdate = true;
-  crowns.instanceMatrix.needsUpdate = true;
+  if (trunks.instanceColor) trunks.instanceColor.needsUpdate = true;
   trunks.castShadow = true;
-  crowns.castShadow = true;
   group.add(trunks);
-  group.add(crowns);
+
+  // Broadleaf canopy: 3 overlapping flattened blobs per tree — a wide
+  // main mass low, two smaller satellites offset up/out — so the crown
+  // is an irregular mound, never a disc on a stick. Faceted
+  // (flatShading) + per-blob green jitter, like the guides' oak cluster.
+  const blobGeo = new THREE.SphereGeometry(1, 7, 5);
+  const blobMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1, flatShading: true });
+  const blobMeshes = [0, 1, 2].map(() => {
+    const m = new THREE.InstancedMesh(blobGeo, blobMat, treeSpots.length);
+    m.castShadow = true;
+    group.add(m);
+    return m;
+  });
+  // Blob profile: [dx, dy, dz, rx, ry, rz] relative to the trunk top,
+  // in units of the tree's canopy scale s.
+  const BLOB_PROFILE = [
+    [0, 1.1, 0, 2.7, 1.9, 2.7],
+    [1.7, 0.3, 0.7, 1.9, 1.35, 1.9],
+    [-1.5, 0.5, -0.9, 1.7, 1.25, 1.7],
+  ];
+  treeSpots.forEach(([x, z], i) => {
+    const top = trunkTops.get(beachSpots.length + i);
+    const s = top[3];
+    BLOB_PROFILE.forEach(([dx, dy, dz, rx, ry, rz], b) => {
+      const jx = (rngTree() - 0.5) * 0.5 * s, jz = (rngTree() - 0.5) * 0.5 * s;
+      dummy.position.set(top[0] + dx * s + jx, top[1] + dy * s, top[2] + dz * s + jz);
+      dummy.rotation.set(0, rngTree() * Math.PI * 2, 0);
+      dummy.scale.set(rx * s, ry * s, rz * s);
+      dummy.updateMatrix();
+      blobMeshes[b].setMatrixAt(i, dummy.matrix);
+      tmpColor.setHSL(0.33 + rngTree() * 0.04, 0.42 + rngTree() * 0.12, 0.26 + rngTree() * 0.12);
+      blobMeshes[b].setColorAt(i, tmpColor);
+    });
+  });
+  for (const m of blobMeshes) {
+    m.instanceMatrix.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+  }
+
+  // Palm crown: 7 drooping fronds + a dark heart where they meet.
+  // A frond is a cone flattened to a blade; tilt 100–120° from vertical
+  // so the tip hangs below the crown top, azimuth spread around the
+  // trunk. One InstancedMesh for all fronds of all palms.
+  const FRONDS_PER_PALM = 7;
+  const frondGeo = new THREE.ConeGeometry(0.5, 4.8, 5);
+  frondGeo.scale(1, 1, 0.3); // blade: wide tangentially, thin radially
+  const frondMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1, flatShading: true });
+  const fronds = new THREE.InstancedMesh(frondGeo, frondMat, beachSpots.length * FRONDS_PER_PALM);
+  const heartGeo = new THREE.SphereGeometry(1, 7, 5);
+  const heartMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 1, flatShading: true });
+  const hearts = new THREE.InstancedMesh(heartGeo, heartMat, beachSpots.length);
+  let fi = 0;
+  beachSpots.forEach(([x, z], i) => {
+    const top = trunkTops.get(i);
+    dummy.position.set(top[0], top[1] + 0.1, top[2]);
+    dummy.rotation.set(0, 0, 0);
+    dummy.scale.set(1.1, 0.8, 1.1);
+    dummy.updateMatrix();
+    hearts.setMatrixAt(i, dummy.matrix);
+    tmpColor.setHSL(0.32, 0.45, 0.20 + rngTree() * 0.06);
+    hearts.setColorAt(i, tmpColor);
+    const baseAz = rngTree() * Math.PI * 2;
+    for (let f = 0; f < FRONDS_PER_PALM; f++) {
+      const az = baseAz + (f / FRONDS_PER_PALM) * Math.PI * 2 + (rngTree() - 0.5) * 0.3;
+      const tilt = 1.75 + rngTree() * 0.35; // 100–120°: tip droops below the crown
+      const len = 0.85 + rngTree() * 0.35;
+      const dirX = Math.sin(tilt) * Math.sin(az);
+      const dirY = Math.cos(tilt);
+      const dirZ = Math.sin(tilt) * Math.cos(az);
+      const reach = (4.8 * len) / 2 - 0.4;
+      dummy.position.set(top[0] + dirX * reach, top[1] + dirY * reach, top[2] + dirZ * reach);
+      dummy.rotation.set(tilt, az, 0);
+      dummy.rotation.order = 'YXZ';
+      dummy.scale.set(len, len, len);
+      dummy.updateMatrix();
+      fronds.setMatrixAt(fi, dummy.matrix);
+      tmpColor.setHSL(0.31 + rngTree() * 0.04, 0.48, 0.28 + rngTree() * 0.10);
+      fronds.setColorAt(fi, tmpColor);
+      fi++;
+    }
+  });
+  fronds.instanceMatrix.needsUpdate = true;
+  if (fronds.instanceColor) fronds.instanceColor.needsUpdate = true;
+  hearts.instanceMatrix.needsUpdate = true;
+  if (hearts.instanceColor) hearts.instanceColor.needsUpdate = true;
+  fronds.castShadow = true;
+  hearts.castShadow = true;
+  group.add(fronds);
+  group.add(hearts);
+  // The shared dummy is reused by lamps below — leave it clean.
+  dummy.scale.set(1, 1, 1);
+  dummy.rotation.set(0, 0, 0);
+  dummy.rotation.order = 'XYZ';
 
   // ---- traffic lights + lamps ----------------------------------------------
   const poleMat = new THREE.MeshStandardMaterial({ color: '#3a3f45', roughness: 0.6, metalness: 0.5 });

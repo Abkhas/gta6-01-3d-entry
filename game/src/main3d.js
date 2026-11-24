@@ -1063,6 +1063,11 @@ function useCrewAbility(id) {
 
 function startGameFromTitle(loadSave) {
   if (window.PalmaScreens3d && window.PalmaScreens3d.hideTitle) window.PalmaScreens3d.hideTitle();
+  // r12-B4: the HUD was hidden for the title — bring it back the
+  // moment the game starts. display is cleared (not set to a fixed
+  // value) so the host keeps its boot sizing; the 15 Hz tick
+  // repopulates it on the first playing frame.
+  if (hudHost) hudHost.style.display = '';
   S.screen = 'playing';
   // NEW GAME passes loadSave === false: the selected slot is ignored
   // and the game starts fresh. Anything else loads the slot.
@@ -1732,6 +1737,10 @@ function setupShotMode() {
     camera.lookAt(built.camera.lookAt.x, built.camera.lookAt.y, built.camera.lookAt.z);
     camera.fov = built.camera.fov || (built.mode === 'heli' ? 45 : 42);
     camera.updateProjectionMatrix();
+    // r12: refresh matrixWorldInverse so renderShotExtras projects the
+    // heli tags through THIS shot camera, not the stale title camera
+    // (it runs before the first renderer.render updates the matrices).
+    camera.updateMatrixWorld();
   }
   if (barEl) barEl.textContent = built.footer;
   // Meshes for the staged records (they carry no bodies yet).
@@ -1775,6 +1784,13 @@ function setupShotMode() {
 // Title screen (default on boot).
 // ---------------------------------------------------------------------
 function showTitleScreen() {
+  // r12-B4: the HUD host is built at boot with its panels (vitals,
+  // dispatch) already in the DOM, and the title's sky scrim is
+  // translucent — so HEALTH/ARMOUR and PVPD DISPATCH bled through
+  // the top edge of the title even though hud.update never runs on
+  // the title. Hide the whole HUD host while the title is up; the
+  // title's own DOM is the only overlay on screen.
+  if (hudHost) hudHost.style.display = 'none';
   if (window.PalmaScreens3d) {
     window.PalmaScreens3d.showTitle(S, city, { selected: S.titleSlot || 0 });
   }

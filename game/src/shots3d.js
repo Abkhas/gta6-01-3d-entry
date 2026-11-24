@@ -353,29 +353,33 @@
     state.player.money = 12450;
     state.player.ammo = { pistol: 9, pistol_reserve: 48 };
     stageChase(state, city, 4);
-    // The pursuit, on the road in-frame: a cruiser ahead in the
-    // northbound lane, a bike and a ramming cruiser head-on in the
-    // southbound lane, a foot officer on the sand-side kerb. The
-    // other units chase from behind, off-frame south — the board
-    // shows them closing, the frame stays a chase, not a pile-up.
+    // The pursuit, on the road in-frame (r12 — Khase's marks on the
+    // r11 chase frame): THREE cruisers chasing where he drew the
+    // dark-purple spots — one tight on the hero's front-right in the
+    // northbound lane, one head-on mid-distance in the southbound
+    // lane, one head-on near on the left flank — plus the head-on
+    // bike between the two west-lane cruisers. The fourth cruiser
+    // and the second bike chase from behind, off-frame south — the
+    // board shows them closing, the frame stays a chase, not a
+    // pile-up. Headings follow the lane (northbound east, southbound
+    // west), so nobody drives the wrong way.
     placePolice(state,
-      [[-1423, 540, -Math.PI / 2], [-1437, 660, Math.PI / 2], [-1423, 740, -Math.PI / 2], [-1437, 780, Math.PI / 2]],
+      [[-1423, 592, -Math.PI / 2], [-1437, 520, Math.PI / 2], [-1437, 585, Math.PI / 2], [-1423, 740, -Math.PI / 2]],
       [[-1437, 570, Math.PI / 2], [-1423, 800, -Math.PI / 2]],
       [-1452, 620]);
-    // AIR-1 IN FRAME (r6): the old dispatch offset (hero +140 east,
-    // -130 north, alt 60) put the heli ~24 deg above the horizon —
-    // far over the 42-deg lens's top edge (~9.7 deg), so it never
-    // rendered. Park her ahead over the beach road instead: 180 m
-    // north, 12 m east of the centreline, alt 22 m. From the chase
-    // lens that is ~6 deg above the horizon, ~9% down from the top
-    // of the frame — mid sky-band, just right of centre, above the
-    // traffic column. Both alt and altitude are set: the police
-    // system reads alt, the renderer reads altitude.
+    // AIR-1 IN FRAME (r12 — Khase's red circle, top centre-left by
+    // the STAGE 3/4 label): the r6 park (hero +12 east, -180 north,
+    // alt 22) read far and small at top centre. Bring her in close
+    // and big instead: 28 m west of the hero, 115 m north, alt 15 —
+    // ~125 m from the lens instead of ~188 m, so she renders ~1.5x
+    // larger, just right of the STAGE 3/4 label. Both alt and
+    // altitude are set: the police system reads alt, the renderer
+    // reads altitude.
     if (state.police.heli) {
-      state.police.heli.x = hero.x + 12;
-      state.police.heli.z = hero.z - 180;
-      state.police.heli.alt = 22;
-      state.police.heli.altitude = 22;
+      state.police.heli.x = hero.x - 28;
+      state.police.heli.z = hero.z - 115;
+      state.police.heli.alt = 15;
+      state.police.heli.altitude = 15;
       state.police.heli.angle = 0;
       state.police.heli.callsign = 'AIR-1';
     }
@@ -404,6 +408,26 @@
         x: -1560 + rng() * 60, z: road.z - 160 + i * 45,
         angle: rng() * Math.PI * 2, speed: 1 + rng(),
         color: '#e8b48f', shirt: SHIRT_COLORS[i % SHIRT_COLORS.length], health: 100
+      });
+    }
+    // Sidewalk walkers (r12 — Khase's blue lines along both
+    // sidewalks): 6 a side on the 9 m sidewalk strips (west -1439,
+    // east -1421), walking the road north/south in the mid-distance
+    // band ahead of the hero, clear of the staged pursuit (west
+    // cruisers at z 520/585, bike at 570; east cruiser at 592) and
+    // of the rush-hour lanes (2 m lateral clear of every car).
+    var walkZ = [578, 552, 532, 502, 472, 446];
+    var walkZE = [566, 540, 512, 484, 452, 424];
+    for (i = 0; i < 6; i++) {
+      state.peds.push({
+        x: road.x - 9, z: walkZ[i],
+        angle: (i % 2 === 0) ? -Math.PI / 2 : Math.PI / 2, speed: 1 + (i % 3) * 0.3,
+        color: '#e8b48f', shirt: SHIRT_COLORS[(i * 2 + 1) % SHIRT_COLORS.length], health: 100
+      });
+      state.peds.push({
+        x: road.x + 9, z: walkZE[i],
+        angle: (i % 2 === 0) ? Math.PI / 2 : -Math.PI / 2, speed: 1 + ((i + 1) % 3) * 0.3,
+        color: '#e8b48f', shirt: SHIRT_COLORS[(i * 2 + 3) % SHIRT_COLORS.length], health: 100
       });
     }
     setMission(state, 'old-town-score', 'MISSION 6 "OLD TOWN SCORE"', 2, 4,
@@ -498,6 +522,32 @@
         health: 100, fleeing: true
       });
       n++;
+    }
+    // Sidewalk pedestrians (r12): the fleeing crowd above runs down
+    // the road SOUTH of Rey — behind the camera, invisible. Keep
+    // pedestrians visible on the sidewalks where the frame shows
+    // them: walkers on both avenue sidewalks (west -809, east -791,
+    // 9 m off the centreline) AHEAD of Rey, fleeing south away from
+    // the rivals, clear of the parked Cometa (-788, -45), the
+    // responding bike (-792, -20) and the rivals on the centreline
+    // (-800, -113..-128).
+    var swZ = [-30, -55, -80, -105];
+    var swZE = [-35, -65, -90];
+    for (var s = 0; s < swZ.length; s++) {
+      state.peds.push({
+        x: road.x - 9, z: road.z + swZ[s],
+        angle: Math.PI / 2, speed: 3 + rng(),
+        color: '#e8b48f', shirt: SHIRT_COLORS[s % SHIRT_COLORS.length],
+        health: 100, fleeing: true
+      });
+    }
+    for (var t = 0; t < swZE.length; t++) {
+      state.peds.push({
+        x: road.x + 9, z: road.z + swZE[t],
+        angle: Math.PI / 2, speed: 3 + rng(),
+        color: '#e8b48f', shirt: SHIRT_COLORS[(t + 2) % SHIRT_COLORS.length],
+        health: 100, fleeing: true
+      });
     }
     var mover = nearestRoadPoint(city, road.x + 12, road.z + 180);
     state.cars.push({
@@ -667,7 +717,19 @@
     };
     state.radioStation = 1;
     finishStaging(state, city);
-    state.shotCamera = chaseCamera(gull.x, gull.z, -Math.PI / 2, 11, 19.9, 8, 16);
+    // (r12) Three-quarter rear-side view: the old camera sat dead
+    // astern on her centreline (11 m back, 4.9 m up), so the frame
+    // showed her tail boom end-on, the rotor disc edge-on and the
+    // tail-rotor cross dead centre — a gold box, not a helicopter.
+    // Offset 8 m to her starboard flank and 10 m behind, 4.5 m
+    // above her, looking slightly ahead of her centre: the cabin
+    // flank, sloped nose, tail boom and rotor ellipse all read, and
+    // she still fills the frame (~19 m off the lens). chaseCamera
+    // only does dead-astern, so this shot builds its camera inline.
+    state.shotCamera = {
+      pos: { x: gull.x + 8, y: 19.5, z: gull.z + 10 },
+      lookAt: { x: gull.x - 1, y: 15, z: gull.z - 6 }
+    };
     return { name: 'heli', state: state, city: city, seed: seed, camera: state.shotCamera, mode: 'golden' };
   }
 

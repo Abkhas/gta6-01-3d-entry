@@ -5,17 +5,21 @@
 // One strict 1280x720 design grid, scaled as a whole to the real
 // window; every panel lives inside its own zone, zero overlaps:
 //
-//   TOP ROW    mission header (left, x14 w470) | money + stars (right)
-//   LEFT RAIL  vitals (y100) -> PVPD dispatch (y154, only when wanted)
-//   RIGHT RAIL crew cards (y90, three cards)
+//   TOP ROW    mission header (left, x14 w470) | money + stars (right,
+//              right edge 1274 — 6px from the edge, stars 28px)
+//   LEFT RAIL  vitals (y118) -> PVPD dispatch (y222, only when wanted)
+//   RIGHT RAIL cheat-codes panel (y96, one long vertical list box:
+//              header + 3 crew rows + cheat input + message)
 //   BOTTOM     clock + radio (above the minimap, never under the bar)
-//              minimap (bottom-left) | weapon bar (bottom centre-left)
+//              minimap (bottom-left) | weapon bar (bottom CENTRE, x373)
 //              dialogue (bottom-centre, above the weapon bar)
-//              speedo (bottom-right)
+//              speedo (bottom-RIGHT corner, x1044 y656, flush to 720)
 //
 // Zone edges, checked against each other: mission ends x484, money
-// starts x1036; dialogue ends y652, weapons start y660; weapons end
-// x814, speedo starts x1036; clock ends y523, minimap starts y534.
+// starts x1074; dialogue ends y650, weapons start y672, speedo
+// starts y656 (x1044, clear of the centred weapons which end x907);
+// money ends y88, cheat panel starts y96; clock ends y522, minimap
+// starts y542.
 //
 // Everything the HUD shows comes from the state object the game loop
 // owns (see main3d.js for the full shape). Where a 3D system module
@@ -92,15 +96,15 @@
   function layoutZones() {
     return {
       mission: { x: 14, y: 14, w: 470, h: 80 },
-      money: { x: 1036, y: 14, w: 230, h: 74 },
+      money: { x: 1074, y: 14, w: 200, h: 74 },
       vitals: { x: 14, y: 118, w: 252, h: 86 },
       dispatch: { x: 14, y: 222, w: 252, h: 0 }, // height grows with rows
-      crew: { x: 1096, y: 108, w: 170, h: 120 },
+      crew: { x: 1104, y: 96, w: 170, h: 196 },
       clock: { x: 14, y: 470, w: 340, h: 52 },
       minimap: { x: 14, y: 542, w: 230, h: 172 },
       dialogue: { x: 320, y: 580, w: 640, h: 70 },
-      weapons: { x: 280, y: 672, w: 534, h: 46 },
-      speedo: { x: 1036, y: 640, w: 230, h: 64 }
+      weapons: { x: 373, y: 672, w: 534, h: 46 },
+      speedo: { x: 1044, y: 656, w: 230, h: 64 }
     };
   }
 
@@ -184,10 +188,12 @@
 
   // ---- crew rows -------------------------------------------------------
 
+  // Full names: the cheat-codes panel lists the crew by full name
+  // (r12), the systems screen still carries their abilities in depth.
   var CREW_DEFS = [
-    { key: 'tuck', name: 'TUCK', job: 'Swap Plates', hotkey: 'Z' },
-    { key: 'ines', name: 'INES', job: 'Quick Fix', hotkey: 'X' },
-    { key: 'kip', name: 'KIP', job: 'Eyes Out', hotkey: 'V' }
+    { key: 'tuck', name: 'TUCK IBARRA', job: 'Swap Plates', hotkey: 'Z' },
+    { key: 'ines', name: 'INES DUARTE', job: 'Quick Fix', hotkey: 'X' },
+    { key: 'kip', name: 'KIP ANSEL', job: 'Eyes Out', hotkey: 'V' }
   ];
 
   function crewRows(state) {
@@ -214,7 +220,57 @@
     return out;
   }
 
-  // ---- weapons ----------------------------------------------------------
+  // ---- cheat codes (r12) ------------------------------------------------
+  // Typed into the input at the foot of the cheat-codes panel. The
+  // handler mutates the live game state S directly — this module owns
+  // the HUD, so it never touches main3d.js. Codes are matched
+  // case-insensitively, surrounding whitespace ignored; each one does
+  // something real and returns a one-line message for the panel.
+  var CHEAT_CODES = {
+    money: { aliases: ['money', 'cash', 'rich', 'cashmoney'], message: 'CHEAT: +$50,000' },
+    health: { aliases: ['health', 'heal', 'medic', 'fullhealth'], message: 'CHEAT: HEALTH + ARMOUR 100' },
+    wanted: { aliases: ['wanted', 'clear', 'clean', 'cops', 'laylow'], message: 'CHEAT: WANTED CLEARED' },
+    ammo: { aliases: ['ammo', 'bullets', 'reload'], message: 'CHEAT: AMMO REFILLED' }
+  };
+
+  function applyCheat(state, rawCode) {
+    var code = String(rawCode || '').trim().toLowerCase();
+    if (!code) return { ok: false, message: '' };
+    if (!state || !state.player) return { ok: false, message: 'NO GAME STATE' };
+    var p = state.player;
+    var key = null;
+    var names = Object.keys(CHEAT_CODES);
+    for (var i = 0; i < names.length; i++) {
+      if (CHEAT_CODES[names[i]].aliases.indexOf(code) !== -1) { key = names[i]; break; }
+    }
+    if (!key) return { ok: false, message: 'UNKNOWN CHEAT: ' + code.toUpperCase() };
+    if (key === 'money') {
+      p.money = (p.money || 0) + 50000;
+    } else if (key === 'health') {
+      p.health = 100;
+      p.armour = 100;
+    } else if (key === 'wanted') {
+      state.wanted = 0;
+      if (state.police) {
+        state.police.units = [];
+        state.police.heli = null;
+      }
+    } else if (key === 'ammo') {
+      var defs = weaponDefs();
+      if (!p.ammo) p.ammo = {};
+      for (var w = 0; w < defs.length; w++) {
+        if (defs[w].mag > 0) {
+          p.ammo[defs[w].id] = defs[w].mag;
+          p.ammo[defs[w].id + '_reserve'] = defs[w].reserve;
+        }
+      }
+    }
+    return { ok: true, message: CHEAT_CODES[key].message };
+  }
+
+  // The state the HUD last updated with — the cheat input submits
+  // against it (updateHud refreshes it every frame).
+  var cheatState = null;
 
   function weaponDefs() {
     var cfg = config();
@@ -338,17 +394,47 @@
     dom.dispatchRows = el('div', 'pv3d-dispatch-rows', dom.dispatch);
     dom.dispatchMore = el('div', 'pv3d-dispatch-more', dom.dispatch);
 
-    // Crew rail, right.
-    dom.crew = place(el('div', 'pv3d-crew', stage), zones.crew);
+    // Cheat-codes panel, right rail (r12): ONE long vertical list
+    // box, not three separate cards — header 'CHEAT CODES', one row
+    // per crew member (full name + ability + readiness), then a text
+    // input to add cheats, then a one-line result message. The input
+    // takes pointer events (the HUD host disables them) and swallows
+    // its key events, so typing a cheat never reaches the game's
+    // window keydown handler (Z/X/V would fire crew abilities, E the
+    // context action, Space a jump, Enter the title menu).
+    dom.crew = place(el('div', 'pv3d-panel pv3d-crew', stage), zones.crew);
+    dom.crewHeader = el('div', 'pv3d-crew-header', dom.crew);
+    dom.crewHeader.textContent = 'CHEAT CODES';
     dom.crewCards = [];
     for (var c = 0; c < 3; c++) {
-      var card = el('div', 'pv3d-panel pv3d-crew-card', dom.crew);
-      var head = el('div', 'pv3d-crew-head', card);
-      var status = el('div', 'pv3d-crew-status', card);
-      var track = el('div', 'pv3d-bar-track pv3d-bar-thin', card);
-      var fill = el('div', 'pv3d-bar-fill pv3d-bar-cooldown', track);
-      dom.crewCards.push({ card: card, head: head, status: status, fill: fill, track: track });
+      var row = el('div', 'pv3d-crew-row', dom.crew);
+      var head = el('div', 'pv3d-crew-name', row);
+      var status = el('div', 'pv3d-crew-sub', row);
+      dom.crewCards.push({ card: row, head: head, status: status });
     }
+    dom.cheatInput = el('input', 'pv3d-cheat-input', dom.crew);
+    dom.cheatInput.type = 'text';
+    dom.cheatInput.placeholder = 'TYPE A CHEAT + ENTER';
+    dom.cheatInput.maxLength = 24;
+    dom.cheatInput.setAttribute('aria-label', 'Cheat code');
+    dom.cheatMsg = el('div', 'pv3d-cheat-msg', dom.crew);
+    dom.cheatMsg.textContent = 'TRY: MONEY · HEALTH · WANTED · AMMO';
+    dom.cheatInput.addEventListener('keydown', function (e) {
+      // Stop the keystroke here: main3d.js listens on window and
+      // would otherwise act on every letter while the player types.
+      if (e.stopPropagation) e.stopPropagation();
+      if (e.key === 'Enter' || e.code === 'Enter') {
+        if (e.preventDefault) e.preventDefault();
+        var res = applyCheat(cheatState, dom.cheatInput.value);
+        dom.cheatMsg.textContent = res.message || '';
+        dom.cheatMsg.style.color = res.ok ? '#4caf50' : '#ff8a5e';
+        if (res.ok) dom.cheatInput.value = '';
+        if (dom.cheatInput.blur) dom.cheatInput.blur();
+      }
+    });
+    dom.cheatInput.addEventListener('keyup', function (e) {
+      if (e.stopPropagation) e.stopPropagation();
+    });
 
     // Clock + radio, above the minimap.
     dom.clock = place(el('div', 'pv3d-panel pv3d-clock', stage), zones.clock);
@@ -1521,6 +1607,7 @@
   function updateHud(dom, state, city) {
     var p = state.player;
     var zones = dom.zones;
+    cheatState = state;
 
     // Mission header.
     var info = missionInfo(state);
@@ -1542,12 +1629,18 @@
       dom.missionBar.style.width = '0%';
     }
 
-    // Money + stars.
+    // Money + stars (r12: 28px stars, lit ones bright gold with a
+    // glow + dark outline so they read over a bright sky, empty ones
+    // dim grey outlines; 4+ stars burn red).
     dom.moneyValue.textContent = moneyStr(p.money);
-    var stars = '';
-    for (var s = 0; s < 5; s++) stars += s < state.wanted ? '★' : '☆';
-    dom.moneyStars.textContent = stars;
-    dom.moneyStars.style.color = state.wanted >= 4 ? '#ff5a4a' : '#ffd166';
+    var starsHtml = '';
+    for (var s = 0; s < 5; s++) {
+      starsHtml += s < state.wanted
+        ? '<span class="pv3d-star-lit">★</span>'
+        : '<span class="pv3d-star-dim">☆</span>';
+    }
+    dom.moneyStars.innerHTML = starsHtml;
+    dom.moneyStars.classList.toggle('pv3d-stars-hot', state.wanted >= 4);
 
     // Vitals.
     dom.vitalsName.textContent = 'REY CALDER';
@@ -1588,16 +1681,18 @@
       dom.dispatch.style.display = 'none';
     }
 
-    // Crew rail.
+    // Cheat-codes panel: full name on the first line, ability +
+    // readiness on the second (green READY, orange COOLDOWN). The
+    // thin cooldown bar is gone with the old cards — the status text
+    // carries the countdown. Crew abilities themselves still live in
+    // the systems screen, so no depth is lost.
     var crows = crewRows(state);
     for (var c = 0; c < 3; c++) {
       var card = dom.crewCards[c];
       var row = crows[c] || { name: CREW_DEFS[c].name, ability: CREW_DEFS[c].job, label: 'READY [' + CREW_DEFS[c].hotkey + ']', fraction: 0, ready: true };
-      card.head.textContent = (row.name || CREW_DEFS[c].name) + ' — ' + (row.ability || CREW_DEFS[c].job).toUpperCase();
-      card.status.textContent = row.label || '';
+      card.head.textContent = row.name || CREW_DEFS[c].name;
+      card.status.textContent = (row.ability || CREW_DEFS[c].job).toUpperCase() + ' · ' + (row.label || '');
       card.status.style.color = row.ready ? '#4caf50' : '#ff8a5e';
-      card.fill.style.width = Math.round(clamp(row.fraction || 0, 0, 1) * 100) + '%';
-      card.track.style.display = row.ready ? 'none' : '';
     }
 
     // Clock + radio, above the minimap.
@@ -1741,6 +1836,8 @@
       weaponSlots: weaponSlots,
       moneyStr: moneyStr,
       clockStr: clockStr,
+      applyCheat: applyCheat,
+      cheatCodes: CHEAT_CODES,
       standingLabel: standingLabel,
       conditionLabel: conditionLabel,
       isFullmapOpen: function () { return fullmapOpen; },
@@ -1775,7 +1872,13 @@
       '.pv3d-bar-cooldown{background:#ff8a5e}',
       '.pv3d-money{padding:6px 10px;text-align:right}',
       '.pv3d-money-value{font-size:22px;font-weight:700;color:#ffd166}',
-      '.pv3d-money-stars{font-size:20px;letter-spacing:2px;margin-top:2px}',
+      // r12: stars 28px (was 20), lit ones bright gold with a glow
+      // and a hard dark outline so they stay crisp over a bright
+      // sky; empty ones dim grey outlines, clearly not lit.
+      '.pv3d-money-stars{font-size:28px;letter-spacing:3px;margin-top:0;line-height:1.15}',
+      '.pv3d-star-lit{color:#ffd166;text-shadow:0 0 8px rgba(255,209,102,0.95),0 0 2px rgba(255,255,255,0.9),0 2px 3px rgba(0,0,0,0.95)}',
+      '.pv3d-star-dim{color:rgba(232,232,232,0.55);text-shadow:0 1px 2px rgba(0,0,0,0.9)}',
+      '.pv3d-stars-hot .pv3d-star-lit{color:#ff5a4a;text-shadow:0 0 8px rgba(255,90,74,0.95),0 0 2px rgba(255,255,255,0.9),0 2px 3px rgba(0,0,0,0.95)}',
       '.pv3d-vitals{padding:5px 8px}',
       '.pv3d-vitals-name{font-size:13px;font-weight:700}',
       '.pv3d-vitals-row{display:flex;align-items:center;gap:6px;margin-top:3px}',
@@ -1792,10 +1895,19 @@
       '.pv3d-pill{font-size:10px;font-weight:700;padding:2px 5px;border-radius:8px}',
       '.pv3d-dispatch-dist{font-size:12px;color:#ffd166;margin-left:auto}',
       '.pv3d-dispatch-more{font-size:11px;color:#8a8a92;margin-top:2px}',
-      '.pv3d-crew{display:flex;flex-direction:column;gap:6px}',
-      '.pv3d-crew-card{height:36px;padding:4px 8px}',
-      '.pv3d-crew-head{font-size:12px;font-weight:700;color:#ffd166}',
-      '.pv3d-crew-status{font-size:11px;margin-top:2px}',
+      // r12: the crew rail is ONE long vertical list box (the panel
+      // itself is the box; box-sizing keeps it exactly the zone size)
+      // — header, three rows, cheat input, message line. The input
+      // re-enables pointer events: the HUD host disables them.
+      '.pv3d-crew{box-sizing:border-box;padding:8px 10px}',
+      '.pv3d-crew-header{font-size:13px;font-weight:700;color:#ffd166;letter-spacing:2px;margin-bottom:4px}',
+      '.pv3d-crew-row{padding:3px 0}',
+      '.pv3d-crew-name{font-size:12px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden}',
+      '.pv3d-crew-sub{font-size:11px;margin-top:1px;white-space:nowrap;overflow:hidden}',
+      '.pv3d-cheat-input{pointer-events:auto;width:100%;box-sizing:border-box;margin-top:6px;padding:5px 6px;background:rgba(0,0,0,0.55);border:1px solid rgba(255,209,102,0.6);border-radius:2px;color:#ffd166;font-size:11px;font-family:inherit;outline:none}',
+      '.pv3d-cheat-input:focus{border-color:#ffd166}',
+      '.pv3d-cheat-input::placeholder{color:rgba(255,209,102,0.55)}',
+      '.pv3d-cheat-msg{font-size:10px;color:#8a8a92;margin-top:4px;min-height:12px;white-space:nowrap;overflow:hidden}',
       '.pv3d-clock{padding:6px 8px}',
       '.pv3d-clock-line{font-size:15px;font-weight:700;color:#fff}',
       '.pv3d-radio-line{font-size:12px;color:#ffd166;margin-top:4px;white-space:nowrap;overflow:hidden}',
@@ -1825,7 +1937,9 @@
       '.pv3d-weapon-locked .pv3d-weapon-name-text{color:#c9d2e0}',
       '.pv3d-weapon-ammo{font-size:14px;font-weight:700;color:#ffd166;margin-top:3px}',
       '.pv3d-weapon-key{font-size:10px;color:#8a8a92;margin-top:3px}',
-      '.pv3d-speedo{padding:6px 10px}',
+      // r12: speedo sits in the true bottom-right corner (zone
+      // x1044 y656) and its text hugs the right edge with it.
+      '.pv3d-speedo{padding:6px 10px;text-align:right}',
       '.pv3d-speedo-value{font-size:22px;font-weight:700;color:#fff}',
       '.pv3d-speedo-detail{font-size:12px;font-weight:700;color:#ffd166;margin-top:2px;white-space:nowrap;overflow:hidden}',
       '.pv3d-wheel{position:absolute;left:50%;top:50%;width:560px;margin-left:-280px;margin-top:-190px;background:rgba(8,12,18,0.72);padding:18px;border-radius:8px;text-align:center}',
@@ -1864,6 +1978,8 @@
     standingLabel: standingLabel,
     conditionLabel: conditionLabel,
     rankName: rankName,
+    applyCheat: applyCheat,
+    cheatCodes: CHEAT_CODES,
     isFullmapOpen: function () { return fullmapOpen; },
     setFullmapOpen: setFullmapOpen,
     toggleFullmap: function () { setFullmapOpen(!fullmapOpen); }
