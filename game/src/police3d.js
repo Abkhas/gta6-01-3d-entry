@@ -53,9 +53,23 @@ import * as THREE from '../vendor/three.module.min.js';
 const CALLSIGNS = ['HALCON', 'BRISA', 'FARO', 'MONZON'];
 const TACTIC_CYCLE = ['PIT', 'RAMMING', 'ROADBLOCK', 'FLANKING', 'PIT', 'PURSUIT'];
 const MAX_UNITS = 5;
-const MAX_GROUND = 9;
+const MAX_GROUND = 10;
+const MAX_WANTED = 6; // r10 B6: the heat goes to six stars
+const MAX_FOOT = 8; // r10 B6: cap on foot officers on the street at once
 const HELI_STARS = 3;
+const HELI2_STARS = 6; // r10 B6: the second helicopter only at six stars
 const HELI_ORBIT = 95; // metres, heli orbit radius around the player
+// r10 B6 — the standoff: when Rey stops moving, cruisers park and their
+// crews get out, surround him at pistol range and shoot. Hold still
+// surrounded for BUSTED_STILL_S and it is BUSTED.
+const BUSTED_STILL_S = 6; // seconds still, surrounded, before BUSTED
+const SURROUND_RING = 10; // metres — the ring officers hold around Rey
+const OFFICER_FIRE_RANGE = 40; // metres — pistol range from an officer
+const OFFICER_FIRE_DMG = 2; // HP per officer pistol hit (armour absorbs 60%)
+const OFFICER_FIRE_GAP = 0.9; // seconds between shots per officer
+const HELI_FIRE_RANGE = 120; // metres — a heli shoots from its orbit
+const HELI_FIRE_DMG = 2;
+const HELI_FIRE_GAP = 1.5;
 
 const DISPATCH_FIRST = 0.5;
 const DISPATCH_GAP = 0.9;
@@ -450,24 +464,27 @@ function syncBodyPos(body, x, z, angle) {
   if (body.rotation) body.rotation.y = -angle;
 }
 
-// What the heat buys, by star level. A spec is { kind, role, tactic }.
+// What the heat buys, by star level (r10 B6, Khase's spec). A spec is
+// { kind, role, tactic, crew }: every cruiser carries `crew` officers
+// aboard (front + back seat) who get out and surround Rey when he
+// stops moving; the `foot` entries are officers walking in from the
+// pedestrian paths. 1 star: 1 cruiser (2 aboard) + 2 walk-ins. 2 stars:
+// 2 cruisers (2 aboard each) + 2 walk-ins. 3+: one more cruiser and
+// walk-in per star, AIR-1 from 3 stars, a second helicopter at 6.
+// Foot officers on the street are capped at MAX_FOOT by the deploy
+// step, so six stars never floods the scene.
 export function desiredComposition(wanted) {
   const comp = [];
   if (wanted <= 0) return comp;
-  comp.push({ kind: 'foot', role: 'foot', tactic: 'PURSUIT' });
-  comp.push({ kind: 'cruiser', role: 'chase', tactic: 'PURSUIT' });
-  if (wanted >= 2) {
-    comp.push({ kind: 'cruiser', role: 'chase', tactic: 'RAMMING' });
-    comp.push({ kind: 'bike', role: 'flank', tactic: 'FLANKING' });
+  const cruisers = Math.min(wanted, 6);
+  const walkIns = Math.min(2 + Math.max(0, wanted - 2), 4);
+  for (let i = 0; i < cruisers; i++) {
+    comp.push({
+      kind: 'cruiser', role: 'chase', tactic: TACTIC_CYCLE[i % TACTIC_CYCLE.length], crew: 2,
+    });
   }
-  if (wanted >= 3) {
-    comp.push({ kind: 'cruiser', role: 'chase', tactic: 'PIT' });
-    comp.push({ kind: 'cruiser', role: 'roadblock', tactic: 'ROADBLOCK' });
-  }
-  if (wanted >= 4) comp.push({ kind: 'bike', role: 'chase', tactic: 'PIT' });
-  if (wanted >= 5) {
-    comp.push({ kind: 'foot', role: 'foot', tactic: 'PURSUIT' });
-    comp.push({ kind: 'cruiser', role: 'roadblock', tactic: 'ROADBLOCK' });
+  for (let i = 0; i < walkIns; i++) {
+    comp.push({ kind: 'foot', role: 'foot', tactic: 'PURSUIT', crew: 0 });
   }
   return comp.slice(0, MAX_GROUND);
 }
@@ -479,6 +496,7 @@ export function createPoliceSystem(world, vehicles) {
     vehicles: vehicles || null,
     units: [],
     heli: null,
+    heli2: null,
     queue: [],
     heat: { shots: 0, lastShotT: 0, shotsSinceEsc: 0, lastEscT: -99, shotPolice: false },
     pendingWanted: null,
@@ -486,7 +504,16 @@ export function createPoliceSystem(world, vehicles) {
     unseenT: 0,
     searching: false,
     heliAt: 0,
+    heli2At: 0,
     busted: null,
+    bustedT: 0, // r10 B6: seconds Rey has held still while surrounded
+    playerStill: false, // r10 B6: Rey (on foot or in a stopped car) is not moving
+    playerSpeed: 0,
+    movingT: 0, // r10 B6: continuous seconds of movement — a single
+    // shove frame (a cruiser pushing Rey clear) must not break the
+    // standoff; stillness only breaks after 0.5 s of real movement
+    prevPX: null,
+    prevPZ: null,
     spawnSeq: 0,
     time: 0,
     wanted: 0,
@@ -645,6 +672,39 @@ export function createPoliceSystem(world, vehicles) {
     return true;
   }
 
+  // One foot officer's logic record + ped. Armed with a pistol,
+  // aiming/shooting state owned by driveFoot. `slot` spreads officers
+  // around the surround ring; `fromCar` marks a deployed crew member.
+  function makeFootUnit(x, z, angle, idx, now, fromCar) {
+    const slot = ((idx * 2.39996) % (Math.PI * 2)); // golden angle: slots never bunch
+    return {
+      kind: 'foot',
+      callsign: callsign(idx),
+      tactic: 'PURSUIT',
+      role: 'foot',
+      side: idx % 2 === 0 ? 1 : -1,
+      x, z, angle,
+      speed: 0,
+      body: null,
+      ped: {
+        x, z, angle,
+        health: 100, police: true, officer: true,
+        armed: 'pistol', aiming: false,
+      },
+      searching: false,
+      leaving: false,
+      leaveT: 0,
+      ramT: 0,
+      bustT: 0,
+      fireT: 0.5 + (idx % 3) * 0.3, // staggered first shots, no volley
+      slotAngle: slot,
+      deployedFrom: fromCar || null,
+      bornT: now,
+      searchPhase: idx * 1.7,
+      parkedT: 0,
+    };
+  }
+
   function spawnUnit(player, spec, idx, now) {
     const rng = mulberry32((101 + idx * 17 + Math.floor(now * 7)) >>> 0);
     const minD = spec.kind === 'foot' ? 80 : SPAWN_MIN;
@@ -666,19 +726,27 @@ export function createPoliceSystem(world, vehicles) {
       leaveT: 0,
       ramT: 0,
       bustT: 0,
+      fireT: 0,
+      slotAngle: 0,
+      crew: spec.crew || 0, // officers still aboard this cruiser
+      deployed: [], // foot units this cruiser has put on the street
       bornT: now,
       searchPhase: idx * 1.7,
       parkedT: 0,
     };
     if (spec.kind === 'foot') {
-      base.ped = {
-        x: spot.x + (rng() < 0.5 ? -1 : 1) * 13,
-        z: spot.z + (rng() - 0.5) * 20,
-        angle: rng() * Math.PI * 2,
-        health: 100, police: true, officer: true,
-      };
-      base.x = base.ped.x;
-      base.z = base.ped.z;
+      const foot = makeFootUnit(
+        spot.x + (rng() < 0.5 ? -1 : 1) * 13,
+        spot.z + (rng() - 0.5) * 20,
+        rng() * Math.PI * 2, idx, now, null,
+      );
+      base.ped = foot.ped;
+      base.x = foot.x;
+      base.z = foot.z;
+      base.angle = foot.angle;
+      base.slotAngle = foot.slotAngle;
+      base.fireT = foot.fireT;
+      base.callsign = foot.callsign;
     } else if (sys.vehicles) {
       // Cruisers and bikes both ride on B2's traffic-car factory
       // (there is no separate bike mesh yet); kind 'bike' is the
@@ -705,7 +773,7 @@ export function createPoliceSystem(world, vehicles) {
   function spawnHeli(player) {
     const heli = {
       x: player.x + 70, z: player.z - 65,
-      alt: 65, orbit: 0.7, angle: 0, callsign: 'AIR-1', body: null,
+      alt: 65, orbit: 0.7, angle: 0, callsign: 'AIR-1', body: null, fireT: 1,
     };
     if (sys.vehicles) {
       heli.body = makeBody(sys.vehicles, 'heli', heli.x, heli.z, 0, null);
@@ -714,6 +782,65 @@ export function createPoliceSystem(world, vehicles) {
       }
     }
     return heli;
+  }
+
+  // Second helicopter (six stars): same orbit, opposite phase, so
+  // the two never stack on one point in the sky.
+  function spawnHeli2(player) {
+    const heli = spawnHeli(player);
+    heli.callsign = 'AIR-2';
+    heli.orbit = 0.7 + Math.PI;
+    heli.x = player.x - 70;
+    heli.z = player.z + 65;
+    return heli;
+  }
+
+  function countFoot() {
+    let n = 0;
+    for (const u of sys.units) if (u.kind === 'foot' && !u.leaving) n++;
+    return n;
+  }
+
+  // A cruiser's crew gets out: up to `crew` officers, one per flank
+  // plus one at the rear, each taking a surround slot. The street
+  // never floods — deployment stops at MAX_FOOT officers total.
+  function deployFromCar(car, player) {
+    if (!car.crew || car.crew <= 0) return;
+    if (countFoot() >= MAX_FOOT) return;
+    const c = Math.cos(car.angle);
+    const s = Math.sin(car.angle);
+    const spots = [
+      { x: car.x - s * 2.2, z: car.z + c * 2.2 },
+      { x: car.x + s * 2.2, z: car.z - c * 2.2 },
+      { x: car.x - c * 3.2, z: car.z - s * 3.2 },
+    ];
+    for (const spot of spots) {
+      if (car.crew <= 0 || countFoot() >= MAX_FOOT) break;
+      if (w.isSolid(spot.x, spot.z)) continue;
+      const foot = makeFootUnit(spot.x, spot.z, Math.atan2(player.z - spot.z, player.x - spot.x),
+        sys.units.length + sys.spawnSeq, sys.time, car);
+      sys.units.push(foot);
+      car.deployed.push(foot);
+      car.crew--;
+    }
+  }
+
+  // One pistol/heli hit on Rey: armour absorbs 60% (same split as
+  // the ram damage), the rest is health. A stopped car takes the
+  // hit as damage instead — officers shoot the car, not through it.
+  function damagePlayer(player, dmg) {
+    if (player.vehicle && player.vehicle.kind !== 'heli') {
+      player.vehicle.damage = Math.min(100, (player.vehicle.damage || 0) + dmg);
+      return;
+    }
+    if (typeof player.health !== 'number') return;
+    if (typeof player.armour === 'number' && player.armour > 0) {
+      const absorbed = Math.min(player.armour, dmg * 0.6);
+      player.armour -= absorbed;
+      player.health = Math.max(0, player.health - (dmg - absorbed));
+    } else {
+      player.health = Math.max(0, player.health - dmg);
+    }
   }
 
   function headingOf(player) {
@@ -780,6 +907,23 @@ export function createPoliceSystem(world, vehicles) {
         syncBody(unit);
         return;
       }
+    }
+    // The standoff (r10 B6): Rey has stopped — in a parked car or on
+    // foot — and this cruiser is on scene. Park, put the crew on the
+    // street, and hold: the officers do the arresting, the car does
+    // not keep circling him. A car whose crew is already out holds
+    // with them — it does not drive on into Rey. A moving Rey gets
+    // a chase instead.
+    const crewOut = unit.deployed.some((d) => !d.leaving);
+    if (sys.playerStill && !unit.leaving && (unit.crew > 0 || crewOut) &&
+        dist2(unit.x, unit.z, player.x, player.z) < 70) {
+      unit.speed = Math.max(0, unit.speed - 30 * dt);
+      if (unit.speed < 1) {
+        unit.speed = 0;
+        deployFromCar(unit, player);
+      }
+      syncBody(unit);
+      return;
     }
     let tx;
     let ty;
@@ -874,10 +1018,15 @@ export function createPoliceSystem(world, vehicles) {
 
   // One foot officer, one frame. Runs at Rey on foot, walks the
   // last-seen point while searching, drifts off when stood down.
+  // The standoff (r10 B6): while Rey holds still, officers take
+  // their ring slot around him (SURROUND_RING), face him, point
+  // their pistols and shoot. A moving Rey gets chased, not shot at.
   // Close on Rey while Rey is on foot and the arrest clock runs.
   function driveFoot(unit, player, dt) {
     let tx;
     let ty;
+    const dp = dist2(unit.x, unit.z, player.x, player.z);
+    const surrounding = sys.playerStill && !unit.leaving && dp < 70;
     if (unit.leaving) {
       const away = Math.atan2(unit.z - player.z, unit.x - player.x);
       tx = unit.x + Math.cos(away) * 100;
@@ -887,6 +1036,9 @@ export function createPoliceSystem(world, vehicles) {
       const ph = sys.time * 0.3 + unit.searchPhase;
       tx = ls.x + Math.cos(ph) * 55;
       ty = ls.z + Math.sin(ph) * 55;
+    } else if (surrounding) {
+      tx = player.x + Math.cos(unit.slotAngle) * SURROUND_RING;
+      ty = player.z + Math.sin(unit.slotAngle) * SURROUND_RING;
     } else {
       tx = player.x;
       ty = player.z;
@@ -903,9 +1055,33 @@ export function createPoliceSystem(world, vehicles) {
       if (!w.isSolid(unit.x, nz)) unit.z = nz;
       if (unit.ped) { unit.ped.x = unit.x; unit.ped.z = unit.z; unit.ped.angle = a; }
     }
-    if (!unit.leaving && !player.vehicle) {
-      const dp = dist2(unit.x, unit.z, player.x, player.z);
-      if (dp < BUST_DIST) {
+    // Aim + shoot: on the ring (or close), still target, pistol
+    // range, line of sight. The ped faces Rey and the aim pose
+    // shows the pistol; each officer fires on their own timer.
+    const inRange = dp < OFFICER_FIRE_RANGE;
+    const aiming = surrounding && inRange && hasLineOfSight(unit.x, unit.z, player, OFFICER_FIRE_RANGE);
+    if (unit.ped) {
+      unit.ped.aiming = aiming;
+      if (aiming) unit.ped.angle = Math.atan2(player.z - unit.ped.z, player.x - unit.ped.x);
+    }
+    if (aiming) {
+      unit.angle = Math.atan2(player.z - unit.z, player.x - unit.x);
+      unit.fireT -= dt;
+      if (unit.fireT <= 0) {
+        unit.fireT = OFFICER_FIRE_GAP + (sys.spawnSeq % 5) * 0.08;
+        damagePlayer(player, OFFICER_FIRE_DMG);
+      }
+    } else {
+      unit.fireT = Math.max(unit.fireT - dt, 0);
+    }
+    // The close-range arrest (r10 B6, kept): an officer who RUNS Rey
+    // down and holds him within 15 m for 1.2 s busts him. Officers
+    // already in the standoff ring do NOT use this rule — the 6 s
+    // still-timer governs the surround, or the ring would bust Rey
+    // in 1.2 s and the 6 s rule could never fire.
+    if (!unit.leaving && !player.vehicle && !surrounding) {
+      const dp2 = dist2(unit.x, unit.z, player.x, player.z);
+      if (dp2 < BUST_DIST) {
         unit.bustT += dt;
         if (unit.bustT > BUST_HOLD) applyBusted(player);
       } else {
@@ -925,10 +1101,13 @@ export function createPoliceSystem(world, vehicles) {
     if (typeof player.money === 'number') player.money = Math.max(0, player.money - fine);
     const missionId = sys.missionId || null;
     sys.busted = { at: sys.time, fine, mission: missionId };
+    sys.bustedT = 0;
     sys.wanted = 0;
     sys.queue = [];
     sys.heli = null;
+    sys.heli2 = null;
     sys.heliAt = 0;
+    sys.heli2At = 0;
     sys.searching = false;
     sys.unseenT = 0;
     for (const u of sys.units) { u.leaving = true; u.leaveT = 0; }
@@ -946,15 +1125,16 @@ export function createPoliceSystem(world, vehicles) {
     }
   }
 
-  function updateHeli(player, dt) {
-    const heli = sys.heli;
-    if (!heli) return;
+  // One helicopter, one frame of orbiting. At six stars the helis
+  // shoot: a visible burst from above on their own timer, only with
+  // line of sight (a roof between Rey and AIR-1 is cover).
+  function stepHeli(heli, player, dt, phase) {
     heli.orbit += dt * 0.4;
-    const tx = player.x + Math.cos(heli.orbit) * HELI_ORBIT;
-    const ty = player.z + Math.sin(heli.orbit) * HELI_ORBIT;
+    const tx = player.x + Math.cos(heli.orbit + phase) * HELI_ORBIT;
+    const ty = player.z + Math.sin(heli.orbit + phase) * HELI_ORBIT;
     heli.x += (tx - heli.x) * Math.min(1, 1.5 * dt);
     heli.z += (ty - heli.z) * Math.min(1, 1.5 * dt);
-    heli.angle = heli.orbit + Math.PI / 2;
+    heli.angle = heli.orbit + phase + Math.PI / 2;
     if (heli.body) {
       if (heli.body.position && typeof heli.body.position.set === 'function') {
         heli.body.position.set(heli.x, heli.alt, heli.z);
@@ -963,6 +1143,21 @@ export function createPoliceSystem(world, vehicles) {
       heli.body.x = heli.x;
       heli.body.z = heli.z;
     }
+    if (sys.wanted >= HELI2_STARS) {
+      heli.fireT = (heli.fireT || 0) - dt;
+      if (heli.fireT <= 0) {
+        heli.fireT = HELI_FIRE_GAP;
+        if (dist2(heli.x, heli.z, player.x, player.z) < HELI_FIRE_RANGE &&
+            hasLineOfSight(heli.x, heli.z, player, HELI_FIRE_RANGE)) {
+          damagePlayer(player, HELI_FIRE_DMG);
+        }
+      }
+    }
+  }
+
+  function updateHeli(player, dt) {
+    if (sys.heli) stepHeli(sys.heli, player, dt, 0);
+    if (sys.heli2) stepHeli(sys.heli2, player, dt, Math.PI);
   }
 
   // Contact: a RAMMING or PIT unit that reaches Rey's car bends it —
@@ -1016,15 +1211,20 @@ export function createPoliceSystem(world, vehicles) {
     sys.unseenT = 0;
     sys.searching = false;
     sys.busted = null;
+    sys.bustedT = 0;
+    sys.prevPX = null;
+    sys.prevPZ = null;
     const comp = desiredComposition(stars);
     for (let k = 0; k < comp.length; k++) sys.units.push(spawnUnit(player, comp[k], k, sys.time));
     sys.heli = stars >= HELI_STARS ? spawnHeli(player) : null;
+    sys.heli2 = stars >= HELI2_STARS ? spawnHeli2(player) : null;
     sys.heliAt = 0;
+    sys.heli2At = 0;
     return sys;
   }
 
   function setWanted(level, player) {
-    const target = clamp(level | 0, 0, 5);
+    const target = clamp(level | 0, 0, MAX_WANTED);
     if (target === sys.wanted) return sys.wanted;
     sys.wanted = target;
     if (sys.events && typeof sys.events.onWanted === 'function') sys.events.onWanted(target);
@@ -1086,6 +1286,14 @@ export function createPoliceSystem(world, vehicles) {
         kind: 'heli',
       });
     }
+    if (sys.heli2) {
+      rows.push({
+        callsign: 'AIR-2',
+        tactic: 'SPOTLIGHT',
+        distM: Math.round(dist2(sys.heli2.x, sys.heli2.z, player.x, player.z)),
+        kind: 'heli',
+      });
+    }
     return rows;
   }
 
@@ -1098,6 +1306,30 @@ export function createPoliceSystem(world, vehicles) {
     if (events && events.gunfire) reportGunfire({ target: events.gunfire.target || null }, player);
     if (events && events.crime) reportCrime(events.crime, player);
     let wanted = sys.wanted;
+
+    // Still or moving (r10 B6): displacement since last frame. On
+    // foot, standing still; in a car, speed under 1 m/s. The
+    // standoff, the surround and the BUSTED timer all read this.
+    if (sys.prevPX === null || typeof player.x !== 'number') {
+      sys.prevPX = player.x;
+      sys.prevPZ = player.z;
+      sys.playerSpeed = 0;
+    } else {
+      const moved = dist2(player.x, player.z, sys.prevPX, sys.prevPZ);
+      sys.playerSpeed = dt > 0 ? moved / dt : 0;
+      sys.prevPX = player.x;
+      sys.prevPZ = player.z;
+    }
+    const inCar = !!(player.vehicle && player.vehicle.kind !== 'heli');
+    // Stillness breaks only after half a second of continuous
+    // movement: a single shove frame (a cruiser pushing Rey clear
+    // of its bumper) is not Rey moving, and must not reset the
+    // standoff or the BUSTED clock.
+    const movingNow = inCar
+      ? Math.abs(player.vehicle.speed || 0) >= 1
+      : sys.playerSpeed >= 0.6;
+    sys.movingT = movingNow ? (sys.movingT || 0) + dt : 0;
+    sys.playerStill = (sys.movingT || 0) < 0.5;
 
     // A star scheduled by a crime lands a moment after the shot.
     if (sys.pendingWanted && t >= sys.pendingWanted.at) {
@@ -1115,6 +1347,8 @@ export function createPoliceSystem(world, vehicles) {
       const have = {};
       for (const u of sys.units) {
         if (u.leaving) continue;
+        if (u.deployedFrom) continue; // a deployed crew member is not
+        // a composition walk-in: counting it would stand the crew down
         const key = `${u.kind}:${u.role}:${u.tactic}`;
         have[key] = (have[key] || 0) + 1;
       }
@@ -1134,6 +1368,7 @@ export function createPoliceSystem(world, vehicles) {
       const counts = {};
       for (const u of sys.units) {
         if (u.leaving) continue;
+        if (u.deployedFrom) continue; // crew, not a composition unit
         const sk = `${u.kind}:${u.role}:${u.tactic}`;
         counts[sk] = (counts[sk] || 0) + 1;
         const want = desired.filter(
@@ -1147,6 +1382,8 @@ export function createPoliceSystem(world, vehicles) {
       }
       sys.queue = [];
       sys.heliAt = 0;
+      sys.heli2At = 0;
+      sys.bustedT = 0;
     }
 
     // The dispatch queue: a due spec becomes a unit on the road.
@@ -1164,6 +1401,12 @@ export function createPoliceSystem(world, vehicles) {
       else if (t >= sys.heliAt) { sys.heli = spawnHeli(player); sys.heliAt = 0; }
     }
     if (wanted < HELI_STARS) { sys.heli = null; sys.heliAt = 0; }
+    // AIR-2 lifts off a few seconds after the sixth star.
+    if (wanted >= HELI2_STARS && !sys.heli2) {
+      if (!sys.heli2At) sys.heli2At = t + HELI_DELAY;
+      else if (t >= sys.heli2At) { sys.heli2 = spawnHeli2(player); sys.heli2At = 0; }
+    }
+    if (wanted < HELI2_STARS) { sys.heli2 = null; sys.heli2At = 0; }
 
     // Drive every unit, and prune the dead: a downed officer leaves
     // the street, a wrecked cruiser is stood down.
@@ -1191,6 +1434,25 @@ export function createPoliceSystem(world, vehicles) {
     updateHeli(player, dt);
     for (const u of sys.units) updateSiren(u);
     contactHits(player, dt);
+
+    // The BUSTED clock (r10 B6): Rey holding still while at least
+    // two officers are aiming at him from the ring. Moving, or the
+    // ring breaking, resets it — running is always an out.
+    if (wanted > 0 && sys.playerStill) {
+      let aimers = 0;
+      for (const u of sys.units) {
+        if (u.kind === 'foot' && u.ped && u.ped.aiming &&
+            dist2(u.x, u.z, player.x, player.z) < 30) aimers++;
+      }
+      if (aimers >= 2) {
+        sys.bustedT += dt;
+        if (sys.bustedT >= BUSTED_STILL_S) applyBusted(player);
+      } else {
+        sys.bustedT = 0;
+      }
+    } else {
+      sys.bustedT = 0;
+    }
 
     // Sight: any unit (or AIR-1) with eyes on Rey refreshes the last
     // seen point. Nobody seeing him starts the search clock.
@@ -1232,7 +1494,7 @@ export function createPoliceSystem(world, vehicles) {
     // Escalation: keep shooting and the heat rises, a star at a time.
     // Shooting a police unit escalates faster.
     const heat = sys.heat;
-    if (wanted > 0 && wanted < 5) {
+    if (wanted > 0 && wanted < MAX_WANTED) {
       if (heat.shotPolice && t - heat.lastEscT > 3) {
         sys.wanted = wanted + 1;
         heat.lastEscT = t;
@@ -1258,7 +1520,11 @@ export function createPoliceSystem(world, vehicles) {
       searching: sys.searching,
       unseenSeconds: Math.round(sys.unseenT * 10) / 10,
       heliUp: !!sys.heli,
+      heli2Up: !!sys.heli2,
       units: sys.units.filter((u) => !u.leaving).length,
+      foot: countFoot(),
+      playerStill: sys.playerStill,
+      bustedIn: sys.bustedT > 0 ? Math.max(0, +(BUSTED_STILL_S - sys.bustedT).toFixed(1)) : null,
       dispatch: dispatchRows(player),
       busted: sys.busted,
     };
@@ -1275,4 +1541,4 @@ export function createPoliceSystem(world, vehicles) {
   return sys;
 }
 
-export { HELI_STARS, CALLSIGNS };
+export { HELI_STARS, HELI2_STARS, BUSTED_STILL_S, MAX_FOOT, MAX_WANTED, CALLSIGNS };

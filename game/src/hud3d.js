@@ -486,11 +486,10 @@
   // The r8 saturated green (#5c8a3d) shouted; the olive reads as
   // terrain at 230x172 without drifting to GTA V grey.
   var MAP_COLORS = {
-    ground: '#6d8a4a', groundAlt: '#74904f', groundAlt2: '#7a9155',
+    ground: '#6d8a4a',
     water: '#6f97b8', shoreline: '#a8c8de',
     sand: '#e8cf8a', wetSand: '#c9a95e',
     building: '#f4f4f0', buildingOutline: 'rgba(60,60,55,0.55)',
-    blockEdge: '#59763a', blockHi: 'rgba(255,255,255,0.14)',
     road: '#0d0d0d', casing: '#2e2e2e',
     highwayCasing: '#57503c', highwayEdge: '#8a7a4a'
   };
@@ -568,11 +567,15 @@
         ctx.stroke();
       }
     }
+    // r10 clean sea: the night highway re-stroke starts at the sand
+    // edge too, so no bright line crosses the water at night.
+    var landX = 0;
+    if (c3 && typeof c3.BEACH_X === 'number') landX = mx(c3.BEACH_X);
     for (var j = 0; j < streets.length; j++) {
       if (c3 && streets[j] === c3.HIGHWAY_NORTH_Z) {
         var sz = mz(streets[j]);
         ctx.beginPath();
-        ctx.moveTo(0, sz + 0.5);
+        ctx.moveTo(landX, sz + 0.5);
         ctx.lineTo(W, sz + 0.5);
         ctx.stroke();
       }
@@ -619,7 +622,9 @@
   // dark casing, blue water, warm sand — painted over OUR city
   // geometry. No SA art, no SA names, no SA map data: only the colour
   // language. The world->map transform and every position on the map
-  // are byte-identical to r7; only colours change.
+  // are byte-identical to r7; only colours change. r10: roads are
+  // THIN/THICK lines, not a box grid, and the sea is clean blue —
+  // no road, block or grain line ever crosses the water.
   function drawMinimapStatic(ctx, W, mapH, b, mx, mz, c3, shoreX, sandX, city, districts) {
     ctx.fillStyle = MAP_COLORS.ground;
     ctx.fillRect(0, 0, W, mapH);
@@ -639,6 +644,13 @@
     ctx.lineTo(mx(shoreX) + 0.5, mapH);
     ctx.stroke();
 
+    // r10 clean sea: landX is the east edge of the sand (no road or
+    // grid line starts west of it) and seaX is the waterline (no
+    // building or grain is painted west of it). The sea itself is
+    // just the flat water fill above — clean blue, no lines.
+    var landX = mx(sandX);
+    var seaX = mx(shoreX);
+
     // City blocks: real building footprints when the city adapter
     // carries them, otherwise the block cells of the road grid.
     // SA language: white buildings on green blocks, so the map reads
@@ -653,7 +665,7 @@
         var bd = buildings[bi];
         var bx0 = mx(bd.x0), bz0 = mz(bd.z0 !== undefined ? bd.z0 : bd.y0);
         var bx1 = mx(bd.x1), bz1 = mz(bd.z1 !== undefined ? bd.z1 : bd.y1);
-        if (bx1 < 0 || bz1 < 0 || bx0 > W || bz0 > mapH) continue;
+        if (bx1 < 0 || bz1 < 0 || bx0 > W || bz0 > mapH || bx1 <= seaX) continue;
         ctx.fillStyle = MAP_COLORS.building;
         fillRoundRect(ctx, bx0, bz0, Math.max(1, bx1 - bx0), Math.max(1, bz1 - bz0), 2);
         ctx.strokeStyle = MAP_COLORS.buildingOutline;
@@ -661,28 +673,12 @@
         strokeRoundRect(ctx, bx0, bz0, Math.max(1, bx1 - bx0), Math.max(1, bz1 - bz0), 2);
       }
     } else {
-      for (var gx = 0; gx + 1 < avenues.length; gx++) {
-        for (var gz = 0; gz + 1 < streets.length; gz++) {
-          var cx0 = mx(avenues[gx]) + 1.5, cz0 = mz(streets[gz]) + 1.5;
-          var cx1 = mx(avenues[gx + 1]) - 1.5, cz1 = mz(streets[gz + 1]) - 1.5;
-          if (cx1 <= cx0 || cz1 <= cz0) continue;
-          ctx.fillStyle = ((gx + gz) % 2 === 0) ? MAP_COLORS.groundAlt : MAP_COLORS.groundAlt2;
-          fillRoundRect(ctx, cx0, cz0, cx1 - cx0, cz1 - cz0, 2.5);
-          // 1 px darker edge + a 1 px inner highlight on the top and
-          // left edges: a fake bevel, so the block reads drawn, not
-          // plotted (r9 D2).
-          ctx.strokeStyle = MAP_COLORS.blockEdge;
-          ctx.lineWidth = 1;
-          strokeRoundRect(ctx, cx0, cz0, cx1 - cx0, cz1 - cz0, 2.5);
-          ctx.strokeStyle = MAP_COLORS.blockHi;
-          ctx.beginPath();
-          ctx.moveTo(cx0 + 2, cz0 + 0.5);
-          ctx.lineTo(cx1 - 2, cz0 + 0.5);
-          ctx.moveTo(cx0 + 0.5, cz0 + 2);
-          ctx.lineTo(cx0 + 0.5, cz1 - 2);
-          ctx.stroke();
-        }
-      }
+      // r10: NO per-block rects. The r9 fallback painted every block
+      // cell as its own edged, bevelled box, so the map read as a
+      // grid of boxes. The green ground fill above IS the block
+      // field now — the road lines below carve it, and nothing else
+      // needs drawing. (Positions unchanged: this branch only ran
+      // when the city carried no buildings at all.)
     }
     // District tints: each district's own accent colour at low alpha,
     // under the roads — the stats-map colour-coding (brown/tan/blue),
@@ -693,29 +689,38 @@
       var dist = districts[d];
       var x0 = dist.x0, z0 = (dist.z0 !== undefined ? dist.z0 : dist.y0);
       var x1 = dist.x1, z1 = (dist.z1 !== undefined ? dist.z1 : dist.y1);
+      if (mx(x1) <= landX) continue; // r10: district tint never touches the sea
       ctx.fillStyle = (dist.accent || '#ffd166') + '2e';
       fillRoundRect(ctx, mx(x0), mz(z0), mx(x1) - mx(x0), mz(z1) - mz(z0), 2);
       ctx.fillStyle = (d % 2 === 0) ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)';
       fillRoundRect(ctx, mx(x0), mz(z0), mx(x1) - mx(x0), mz(z1) - mz(z0), 2);
     }
-    // Roads, r9 D1: casing + fill. Every road is stroked twice —
-    // first a wider stroke in a dark casing colour, then the road
-    // fill on top — so roads stop bleeding into the green blocks and
-    // junctions read as connected. Highways get a lighter, warmer
-    // casing plus a thin coloured edge. Ordinary roads keep a solid
-    // black fill (no pale centre line — the SA look); the two
-    // highways keep a thin white centre line.
+    // Roads, r10: LINES, not boxes. The r9 casing/fill at 5/3 px
+    // carved the green into a grid of little squares, so the whole
+    // map read as boxes. Now the hierarchy is line weight only: the
+    // two highways are THICK main lines (7 casing / 5 fill, white
+    // centre, warm edge); every grid street is one THIN side line
+    // (3 casing / 1.5 fill, no centre line); the beach road sits
+    // between them (4 / 2.5). No per-block rect is drawn any more —
+    // the green ground fill IS the block field and the road lines
+    // carve it. Clean sea: every road starts at landX, the east
+    // edge of the sand, so no grid line ever crosses the water;
+    // the beach road is the one exception — it runs on the sand
+    // itself. Positions are unchanged, only stroke widths and the
+    // clip point move. (The city data has one uniform 200 m grid,
+    // so the thick/thin split is highways = mains, grid = sides.)
     for (var a = 0; a < avenues.length; a++) {
       var ax = mx(avenues[a]);
+      if (ax < landX) continue; // west of the sand: sea, no road
       var wideA = !!(c3 && avenues[a] === c3.HIGHWAY_EAST_X);
       ctx.strokeStyle = wideA ? MAP_COLORS.highwayCasing : MAP_COLORS.casing;
-      ctx.lineWidth = wideA ? 7 : 5;
+      ctx.lineWidth = wideA ? 7 : 3;
       ctx.beginPath();
       ctx.moveTo(ax, 0);
       ctx.lineTo(ax, mapH);
       ctx.stroke();
       ctx.strokeStyle = MAP_COLORS.road;
-      ctx.lineWidth = wideA ? 5 : 3;
+      ctx.lineWidth = wideA ? 5 : 1.5;
       ctx.beginPath();
       ctx.moveTo(ax, 0);
       ctx.lineTo(ax, mapH);
@@ -743,32 +748,32 @@
       var sz = mz(streets[s]);
       var wideS = !!(c3 && streets[s] === c3.HIGHWAY_NORTH_Z);
       ctx.strokeStyle = wideS ? MAP_COLORS.highwayCasing : MAP_COLORS.casing;
-      ctx.lineWidth = wideS ? 7 : 5;
+      ctx.lineWidth = wideS ? 7 : 3;
       ctx.beginPath();
-      ctx.moveTo(0, sz);
+      ctx.moveTo(landX, sz);
       ctx.lineTo(W, sz);
       ctx.stroke();
       ctx.strokeStyle = MAP_COLORS.road;
-      ctx.lineWidth = wideS ? 5 : 3;
+      ctx.lineWidth = wideS ? 5 : 1.5;
       ctx.beginPath();
-      ctx.moveTo(0, sz);
+      ctx.moveTo(landX, sz);
       ctx.lineTo(W, sz);
       ctx.stroke();
       if (wideS) {
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(0, sz + 0.5);
+        ctx.moveTo(landX, sz + 0.5);
         ctx.lineTo(W, sz + 0.5);
         ctx.stroke();
         ctx.strokeStyle = MAP_COLORS.highwayEdge;
         ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(0, sz - 3);
+        ctx.moveTo(landX, sz - 3);
         ctx.lineTo(W, sz - 3);
         ctx.stroke();
         ctx.beginPath();
-        ctx.moveTo(0, sz + 3);
+        ctx.moveTo(landX, sz + 3);
         ctx.lineTo(W, sz + 3);
         ctx.stroke();
       }
@@ -776,13 +781,13 @@
     if (city && typeof city.beachRoadX === 'number') {
       var brx = mx(city.beachRoadX);
       ctx.strokeStyle = MAP_COLORS.casing;
-      ctx.lineWidth = 5;
+      ctx.lineWidth = 4;
       ctx.beginPath();
       ctx.moveTo(brx, 0);
       ctx.lineTo(brx, mapH);
       ctx.stroke();
       ctx.strokeStyle = MAP_COLORS.road;
-      ctx.lineWidth = 3;
+      ctx.lineWidth = 2.5;
       ctx.beginPath();
       ctx.moveTo(brx, 0);
       ctx.lineTo(brx, mapH);
@@ -815,13 +820,14 @@
     }
     // Grain (r9 D2): a 3% opacity noise pattern over the baked
     // static layer. It is painted here, once, into the cached
-    // offscreen canvas — never per frame.
+    // offscreen canvas — never per frame. r10: land only, east of
+    // the waterline — the sea stays clean blue, no speckle.
     var pat = mapNoise(ctx);
     if (pat) {
       ctx.save();
       ctx.globalAlpha = 0.03;
       ctx.fillStyle = pat;
-      ctx.fillRect(0, 0, W, mapH);
+      ctx.fillRect(seaX, 0, W - seaX, mapH);
       ctx.restore();
     }
   }

@@ -7,9 +7,11 @@
 // bars + mission medals; centre = full-city map with districts,
 // standing and route; right = career stats + rank + save slots WITH
 // progress. A bottom band holds the crew cards and the garage strip.
-// The title screen is a dusk skyline with NAMED buildings (HOTEL
-// PALMA / LAGUNA VERDE / TORRE BRISA / CASA MARINA / PALM COURT),
-// menu left, save slots with progress right.
+// The title screen is a sunset skyline (two rows of lit-window
+// silhouettes over sand and turquoise sea — no building signs:
+// the signs used to collide with the menu and slot text), a big
+// gradient headline, a bare menu left, save slots with progress
+// right, in the reference title-screen layout.
 //
 // Nothing here owns game logic: it reads the shared state object and
 // the converted systems on window (PalmaMissions3d, PalmaCrew3d,
@@ -242,7 +244,7 @@
   function stagedTitleSlots() {
     return [
       { slot: 1, empty: false, act: 'ACT II', mission: 'old-town-score', missionName: 'Old Town Score', completion: 48, money: 18200, rank: 'fixer', missionsDone: 5, playTime: 18 * 60 + 40 },
-      { slot: 2, empty: false, act: 'ACT I', mission: 'hot-wheels', missionName: 'Hot Wheels', completion: 21, money: 6400, rank: 'wheelman', missionsDone: 1, playTime: 9 * 60 + 30 },
+      { slot: 2, empty: false, act: 'ACT I', mission: 'hot-wheels', missionName: 'Hot Wheels', completion: 21, money: 4350, rank: 'runner', missionsDone: 1, playTime: 7 * 60 + 12 },
       { slot: 3, empty: true }
     ];
   }
@@ -521,6 +523,49 @@
     return card;
   }
 
+  // ---- title-screen save-slot card -------------------------------------
+  // Reference-layout card, used ONLY on the title screen (the
+  // systems screen keeps slotCard above): dark navy with a teal
+  // left border, big yellow % top-right, job title, rank + money,
+  // clock line, orange progress bar, teal Load button. The empty
+  // slot has no % / bar / Load button.
+  function titleSlotCard(slot, selected, timeStr, onLoad) {
+    var card = el('div', 'pv3d-slot pv3d-title-slot' + (selected ? ' pv3d-slot-selected' : ''));
+    var head = el('div', 'pv3d-slot-head', card);
+    setText(head, 'SLOT ' + slot.slot);
+    if (slot.empty) {
+      var empty = el('div', 'pv3d-slot-empty', card);
+      setText(empty, 'EMPTY');
+      var sub = el('div', 'pv3d-slot-sub', card);
+      setText(sub, 'A fresh start on the Boardwalk.');
+    } else {
+      var pct = el('div', 'pv3d-title-slot-pct', card);
+      setText(pct, (slot.completion === null || slot.completion === undefined) ? '—' : slot.completion + '%');
+      var title = el('div', 'pv3d-title-slot-name', card);
+      setText(title, (slot.act || 'ACT I') + '  ·  ' + (slot.missionName || slot.mission || 'FREE ROAM'));
+      var line = el('div', 'pv3d-title-slot-line', card);
+      var parts = [];
+      if (slot.rank) parts.push('RANK: ' + String(slot.rank).toUpperCase());
+      if (slot.money !== null && slot.money !== undefined) parts.push(moneyStr(slot.money));
+      setText(line, parts.join('  ·  ') || '—');
+      var t = slotTime(slot, timeStr);
+      var time = el('div', 'pv3d-title-slot-time', card);
+      setText(time, t || '');
+      var track = el('div', 'pv3d-title-slot-track', card);
+      var fill = el('div', 'pv3d-title-slot-fill', track);
+      fill.style.width = clamp(slot.completion || 0, 0, 100) + '%';
+      if (onLoad) {
+        var load = el('button', 'pv3d-title-slot-load', card);
+        setText(load, 'Load');
+        load.addEventListener('click', function (ev) {
+          if (ev && ev.stopPropagation) ev.stopPropagation();
+          onLoad();
+        });
+      }
+    }
+    return card;
+  }
+
   // ---- systems screen ---------------------------------------------------
   // One overlay, three strict columns, bottom band. Built fresh on
   // each show so the numbers are never stale.
@@ -693,7 +738,7 @@
     setText(el('div', 'pv3d-band-garage-list', garageBand),
       owned.length ? owned.join('  ·  ') : 'No cars owned yet — the Cometa GT is waiting in Old Town.');
     setText(el('div', 'pv3d-band-garage-sub', garageBand),
-      'ESC RESUME  ·  F9 SAVE  ·  TAB WEAPON WHEEL  ·  Q RADIO');
+      'ESC RESUME  ·  F9 SAVE  ·  TAB WEAPON WHEEL  ·  Q RADIO  ·  SPACE JUMP');
 
     return root;
   }
@@ -710,11 +755,31 @@
   }
 
   // ---- title screen ------------------------------------------------------
-  // Dusk skyline behind the title: two rows of buildings with lit
-  // windows and NAMED signs, a low sun, palms and beach umbrellas in
-  // front. Menu left, save slots with progress right.
+  // Sunset skyline behind the title: two rows of buildings with lit
+  // windows (no signs — the old named signs collided with the menu
+  // and slot text), a low sun, sand beach with a turquoise sea
+  // strip, palms and an umbrella in front. Big gradient headline
+  // top-left, bare menu left with description lines, save slots
+  // with progress and Load buttons right.
 
   var titleRoot = null;
+  // Mouse-movement generation: incremented on every real mousemove.
+  // A title re-render rebuilds the DOM under a stationary mouse, and
+  // the browser then fires mouseenter on the element now under the
+  // cursor — without the mouse ever moving. The menu/slot mouseenter
+  // handlers therefore defer their selection by one tick and only
+  // select if the mouse has REALLY moved since the render that built
+  // them: the genuine mousemove is dispatched in the same task as
+  // the mouseenter, so by the time the tick runs the generation has
+  // advanced, while a re-render hover never moves the mouse at all.
+  // (A synchronous check cannot work: the mouseenter fires before
+  // the window mousemove listener runs for the same movement.)
+  var lastMouseMoveId = 0;
+  try {
+    if (typeof window !== 'undefined' && window.addEventListener) {
+      window.addEventListener('mousemove', function () { lastMouseMoveId++; });
+    }
+  } catch (e) { /* stubbed DOM without addEventListener */ }
   // Mouse hover remembers the shared menu selection across title
   // re-renders (main3d rebuilds the title on every Left/Right arrow
   // and never passes selectedMenu, so without this a hover selection
@@ -725,6 +790,7 @@
 
   function showTitle(state, city, opts) {
     hideTitle();
+    var renderMoveId = lastMouseMoveId;
     var root = el('div', 'pv3d-title', document.body);
     titleRoot = root;
     var sky = el('div', 'pv3d-title-sky', root);
@@ -751,8 +817,7 @@
       bx += bw + 8;
       bi++;
     }
-    // Front row: nearer buildings with named signs.
-    var signs = ['HOTEL PALMA', 'LAGUNA VERDE', 'TORRE BRISA', 'CASA MARINA', 'PALM COURT'];
+    // Front row: nearer buildings, windows only — no signs.
     var fx = -10, fi = 0;
     while (fx < 1280) {
       var fw = 80 + hashRand(fi, 3) * 60;
@@ -762,40 +827,66 @@
       front.style.width = fw + 'px';
       front.style.height = (fh + 40) + 'px';
       front.style.bottom = '276px';
-      var sign = el('div', 'pv3d-sky-sign', front);
-      if (fi < signs.length) setText(sign, signs[fi]);
       for (var fy = 0; fy < 5; fy++) {
         for (var fwx = 0; fwx < 4; fwx++) {
           if (hashRand(fi, fy * 10 + fwx + 5) > 0.5) {
             var win2 = el('div', 'pv3d-sky-win pv3d-sky-win-warm', front);
             win2.style.left = (10 + fwx * 18) + 'px';
-            win2.style.top = (46 + fy * 20) + 'px';
+            win2.style.top = (16 + fy * 20) + 'px';
           }
         }
       }
       fx += fw + 14;
       fi++;
     }
-    // Low sun, ground band, palms and umbrellas.
+    // Low sun in the gap between headline and slots, sand beach
+    // with a turquoise sea strip along the bottom, palms and an
+    // umbrella on the sand clear of the footer and the slot cards.
     var sun = el('div', 'pv3d-title-sun', sky);
     var ground = el('div', 'pv3d-title-ground', sky);
+    var sea = el('div', 'pv3d-title-sea', sky);
     var palm1 = el('div', 'pv3d-title-palm', sky);
     palm1.style.left = '70px';
     var palm2 = el('div', 'pv3d-title-palm', sky);
-    palm2.style.left = '1180px';
+    palm2.style.left = '700px';
     var umb = el('div', 'pv3d-title-umbrella', sky);
-    umb.style.left = '1040px';
+    umb.style.left = '620px';
 
     var stage = el('div', 'pv3d-title-stage', root);
     var headline = el('div', 'pv3d-title-headline', stage);
     setText(headline, 'PALMA VERDE');
     var tagline = el('div', 'pv3d-title-tagline', stage);
-    setText(tagline, 'Rey Calder owes Nadia Venn $2,000. The city is open.');
+    setText(tagline, 'A sun-soaked open city');
 
-    var menu = ['CONTINUE', 'NEW GAME', 'LOAD GAME', 'SETTINGS'];
+    // Slots resolve before the menu: the Continue description
+    // summarises slot 1, so it needs the same slot data as the
+    // cards. Staged slots stand in when no real save exists.
+    var slots = readSlots(opts);
+    var anyReal = false;
+    for (var s0 = 0; s0 < slots.length; s0++) {
+      if (slots[s0] && !slots[s0].empty) anyReal = true;
+    }
+    if (!anyReal) slots = stagedTitleSlots();
+    var contDesc = 'No save yet — start a new story';
+    if (slots[0] && !slots[0].empty) {
+      contDesc = 'Slot 1 · ' + (slots[0].act || 'ACT I') + ' ' +
+        (slots[0].missionName || slots[0].mission || 'FREE ROAM') +
+        ' · ' + moneyStr(slots[0].money);
+    }
+    // Three actions now: Load lives on the slot cards, so the menu
+    // is Continue / New Game / Settings, each with a grey
+    // description line under the bold label.
+    var menu = [
+      { key: 'CONTINUE', label: 'Continue', desc: contDesc },
+      { key: 'NEW GAME', label: 'New Game', desc: 'Rey Calder owes Nadia Venn $2,000. The city is open.' },
+      { key: 'SETTINGS', label: 'Settings', desc: 'Keyboard and mouse' }
+    ];
     var sel = (opts && typeof opts.selectedMenu === 'number') ? opts.selectedMenu : lastMenuSel;
-    var menuBox = el('div', 'pv3d-panel pv3d-title-menu', stage);
+    if (sel === 3) sel = 2; // r8 SETTINGS was index 3, now 2
+    else if (sel === 2) sel = 0; // r8 LOAD GAME is gone — its job moved to the slot cards
+    var menuBox = el('div', 'pv3d-title-menu', stage);
     var menuItems = [];
+    var menuLabels = [];
     // One shared selection: mouse hover writes the same sel the
     // render reads, and a click fires the exact Enter handler.
     // main3d is a module, so its start function is not reachable
@@ -807,7 +898,7 @@
       for (var pi = 0; pi < menuItems.length; pi++) {
         if (pi === sel) menuItems[pi].classList.add('pv3d-title-menu-selected');
         else menuItems[pi].classList.remove('pv3d-title-menu-selected');
-        setText(menuItems[pi], (pi === sel ? '▸ ' : '   ') + menu[pi]);
+        setText(menuLabels[pi], (pi === sel ? '▸ ' : '   ') + menu[pi].label);
       }
     }
     function activateMenu() {
@@ -820,12 +911,24 @@
     for (var m = 0; m < menu.length; m++) {
       (function (mi) {
         var item = el('div', 'pv3d-title-menu-item' + (mi === sel ? ' pv3d-title-menu-selected' : ''), menuBox);
-        setText(item, (mi === sel ? '▸ ' : '   ') + menu[mi]);
+        // data-menu is what main3d's dispatch reads: the item now
+        // also carries a description line, so plain label-text
+        // matching would see the description too.
+        item.setAttribute('data-menu', menu[mi].key);
+        var lab = el('div', 'pv3d-title-menu-label', item);
+        setText(lab, (mi === sel ? '▸ ' : '   ') + menu[mi].label);
+        menuLabels.push(lab);
+        var desc = el('div', 'pv3d-title-menu-desc', item);
+        setText(desc, menu[mi].desc);
         menuItems.push(item);
         item.addEventListener('mouseenter', function () {
-          sel = mi;
-          lastMenuSel = mi;
-          paintMenu();
+          var atRender = renderMoveId;
+          setTimeout(function () {
+            if (lastMouseMoveId === atRender) return; // re-render hover, mouse never moved
+            sel = mi;
+            lastMenuSel = mi;
+            paintMenu();
+          }, 0);
         });
         item.addEventListener('click', function () {
           sel = mi;
@@ -836,15 +939,9 @@
       })(m);
     }
 
-    var slots = readSlots(opts);
-    var anyReal = false;
-    for (var s0 = 0; s0 < slots.length; s0++) {
-      if (slots[s0] && !slots[s0].empty) anyReal = true;
-    }
-    if (!anyReal) slots = stagedTitleSlots();
     var selected = (opts && typeof opts.selected === 'number') ? opts.selected : (state.titleSlot || 0);
     var slotsBox = el('div', 'pv3d-title-slots', stage);
-    setText(el('div', 'pv3d-title-slots-head', slotsBox), 'SAVE SLOTS');
+    setText(el('div', 'pv3d-title-slots-head', slotsBox), 'Save slots');
     var clockNow = clockStr(state.clockMinutes);
     var slotCards = [];
     function paintSlots() {
@@ -855,7 +952,19 @@
     }
     for (var i = 0; i < 3; i++) {
       (function (si) {
-        var card = slotCard(slots[si] || { slot: si + 1, empty: true }, si === selected, clockNow);
+        // The title card carries its own Load button: clicking it
+        // selects this slot, forces the menu to Continue (the
+        // button must load even if the mouse last hovered New Game)
+        // and fires the same Enter activation as a menu click.
+        var card = titleSlotCard(slots[si] || { slot: si + 1, empty: true }, si === selected, clockNow, function () {
+          selected = si;
+          state.titleSlot = si;
+          paintSlots();
+          sel = 0;
+          lastMenuSel = 0;
+          paintMenu();
+          activateMenu();
+        });
         slotsBox.appendChild(card);
         slotCards.push(card);
         // Click a slot = select it: writes the same state.titleSlot
@@ -864,9 +973,13 @@
         // activation as the menu. (Systems-screen slots are
         // display-only and are deliberately left untouched.)
         card.addEventListener('mouseenter', function () {
-          selected = si;
-          state.titleSlot = si;
-          paintSlots();
+          var atRender = renderMoveId;
+          setTimeout(function () {
+            if (lastMouseMoveId === atRender) return; // re-render hover, mouse never moved
+            selected = si;
+            state.titleSlot = si;
+            paintSlots();
+          }, 0);
         });
         card.addEventListener('click', function () {
           selected = si;
@@ -883,13 +996,7 @@
     }
 
     var foot = el('div', 'pv3d-title-foot', stage);
-    setText(foot, 'CLICK OR PRESS ENTER TO START  ·  ARROWS / MOUSE PICK A SLOT');
-    var controls = el('div', 'pv3d-title-controls', stage);
-    setText(controls, 'WASD walk / drive   ·   E enter & exit car / start mission   ·   Hold RMB to aim, LMB fire   ·   R reload   ·   Q radio   ·   Z / X / V crew   ·   Esc pause   ·   F9 save');
-    var meta = el('div', 'pv3d-title-meta', stage);
-    setText(meta, clockStr(state.clockMinutes) + '  ·  ' +
-      (state.district ? state.district.name.toUpperCase() : 'PALMA VERDE') +
-      '  ·  10 MISSIONS  ·  7 DISTRICTS  ·  3 RADIO STATIONS');
+    setText(foot, 'An original game. Every model, texture and sound is generated in your browser.');
     return root;
   }
 
@@ -1002,37 +1109,46 @@
       '.pv3d-slot-line{font-size:13px;color:#ffd166;margin-top:4px}',
       '.pv3d-slot-empty{font-size:14px;color:#8a8a92;margin-top:6px}',
       '.pv3d-slot-sub{font-size:12px;color:#8a8a92;margin-top:4px}',
+      // Title screen (r10 redesign): sunset-gradient headline, teal
+      // tagline, bare menu left with description lines, navy slot
+      // cards with teal left border right. Geometry is computed
+      // for the 1280x720 stage: headline ends x~690, slots start
+      // x760; menu ends y~490, slots end y~650, footer y~686 —
+      // no text sits over another element's text.
       '.pv3d-title{position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:8;font-family:system-ui,sans-serif;color:#e8e8e8;overflow:hidden}',
-      '.pv3d-title-sky{position:absolute;left:0;top:0;width:100%;height:100%;background:linear-gradient(180deg,#2a1a4a 0%,#7a3a6e 45%,#ff8a4f 80%,#ffc46b 100%)}',
-      '.pv3d-title-sun{position:absolute;left:72%;top:44%;width:68px;height:68px;border-radius:50%;background:#ffe9b8;box-shadow:0 0 90px 40px rgba(255,196,107,0.35)}',
-      '.pv3d-sky-back{position:absolute;background:#241a33}',
-      '.pv3d-sky-front{position:absolute;background:#1a1226;border-top:3px solid #ffd166}',
+      '.pv3d-title-sky{position:absolute;left:0;top:0;width:100%;height:100%;background:linear-gradient(180deg,#31235c 0%,#7a3a6e 42%,#ff8a4f 72%,#ffc46b 100%)}',
+      '.pv3d-title-sun{position:absolute;left:44%;top:24%;width:68px;height:68px;border-radius:50%;background:#ffe9b8;box-shadow:0 0 90px 40px rgba(255,196,107,0.35)}',
+      '.pv3d-sky-back{position:absolute;background:#2e1f38}',
+      '.pv3d-sky-front{position:absolute;background:#20142c;border-top:3px solid #ffd166}',
       '.pv3d-sky-win{position:absolute;width:8px;height:10px;background:rgba(255,209,102,0.5)}',
       '.pv3d-sky-win-warm{background:#ffd166}',
-      '.pv3d-sky-sign{position:absolute;left:0;right:0;top:22px;text-align:center;font-size:13px;font-weight:700;color:#ffd166}',
-      '.pv3d-title-ground{position:absolute;left:0;right:0;bottom:0;height:276px;background:#120e1a;border-top:10px solid rgba(201,176,120,0.5)}',
-      '.pv3d-title-palm{position:absolute;bottom:8px;width:4px;height:56px;background:#1d2b26}',
-      '.pv3d-title-umbrella{position:absolute;bottom:10px;width:40px;height:20px;border-radius:20px 20px 0 0;background:#e2725b}',
+      '.pv3d-title-ground{position:absolute;left:0;right:0;bottom:0;height:276px;background:linear-gradient(180deg,#d9b078 0%,#c79c62 100%);border-top:3px solid rgba(255,209,102,0.6)}',
+      '.pv3d-title-sea{position:absolute;left:0;right:0;bottom:0;height:54px;background:linear-gradient(180deg,#35c4b5 0%,#1f8f96 100%)}',
+      '.pv3d-title-palm{position:absolute;bottom:64px;width:4px;height:56px;background:#1d2b26}',
+      '.pv3d-title-umbrella{position:absolute;bottom:64px;width:40px;height:20px;border-radius:20px 20px 0 0;background:#e2725b}',
       '.pv3d-title-stage{position:absolute;left:0;top:0;width:1280px;height:720px}',
-      '.pv3d-title-headline{position:absolute;left:48px;top:80px;font-size:64px;font-weight:800;color:#ffd166;letter-spacing:2px;text-shadow:0 2px 12px rgba(0,0,0,0.6)}',
-      '.pv3d-title-tagline{position:absolute;left:50px;top:152px;font-size:20px;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',
-      '.pv3d-title-menu{position:absolute;left:40px;top:260px;width:320px;padding:12px 16px;user-select:none}',
-      '.pv3d-title-menu-item{font-size:20px;font-weight:700;padding:10px 6px;color:#e8e8e8;cursor:pointer;user-select:none}',
-      '.pv3d-title-menu-selected{color:#ffd166}',
-      '.pv3d-title-menu-item:hover{color:#ffd166}',
-      // Save slots moved left + down off the right edge: at right:48
-      // the sun disc (left 72%, top 44% -> x922-990, y317-385) sat
-      // squarely behind save slot 2 and glowed through its panel.
-      // Now x388-840: 81px clear of the disc, ~41px clear of its
-      // glow; 28px right of the menu, 14px below the tagline, ~18px
-      // above the footer. The sun itself is untouched.
-      '.pv3d-title-slots{position:absolute;right:440px;top:190px;width:452px}',
-      '.pv3d-title-slots-head{font-size:15px;font-weight:700;color:#ffd166;margin-bottom:4px}',
-      '.pv3d-title-slots .pv3d-slot{height:104px;cursor:pointer;user-select:none}',
+      '.pv3d-title-headline{position:absolute;left:48px;top:28px;font-size:88px;line-height:1;font-weight:800;letter-spacing:2px;background:linear-gradient(180deg,#ffe9a8 0%,#ffb347 45%,#ff7a59 100%);-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 3px 10px rgba(0,0,0,0.45))}',
+      '.pv3d-title-tagline{position:absolute;left:50px;top:140px;font-size:22px;font-weight:600;color:#2ec4b6;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',
+      '.pv3d-title-menu{position:absolute;left:48px;top:240px;width:460px;user-select:none}',
+      '.pv3d-title-menu-item{padding:12px 0;cursor:pointer;user-select:none}',
+      '.pv3d-title-menu-label{font-size:30px;font-weight:700;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',
+      '.pv3d-title-menu-desc{font-size:13px;color:#d7dde8;margin-top:4px;text-shadow:0 1px 4px rgba(0,0,0,0.6)}',
+      '.pv3d-title-menu-selected .pv3d-title-menu-label{color:#ffd166}',
+      '.pv3d-title-menu-item:hover .pv3d-title-menu-label{color:#ffd166}',
+      '.pv3d-title-slots{position:absolute;left:760px;top:136px;width:472px}',
+      '.pv3d-title-slots-head{font-size:15px;font-weight:700;color:#ffd166;margin-bottom:4px;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',
+      '.pv3d-title-slots .pv3d-slot{position:relative;min-height:136px;background:#0d1626;border:1px solid rgba(255,255,255,0.25);border-left:4px solid #2ec4b6;padding:10px 14px;margin-top:10px;cursor:pointer;user-select:none}',
       '.pv3d-title-slots .pv3d-slot:hover{border-color:#ffd166}',
-      '.pv3d-title-foot{position:absolute;left:0;right:0;bottom:88px;text-align:center;font-size:17px;font-weight:700;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',
-      '.pv3d-title-controls{position:absolute;left:0;right:0;bottom:56px;text-align:center;font-size:14px;color:#c9d2e0}',
-      '.pv3d-title-meta{position:absolute;left:24px;bottom:24px;font-size:13px;color:#8a8a92}'
+      '.pv3d-title-slots .pv3d-slot-head{color:#2ec4b6}',
+      '.pv3d-title-slot-pct{position:absolute;right:14px;top:8px;font-size:30px;font-weight:800;color:#ffd166}',
+      '.pv3d-title-slot-name{font-size:17px;font-weight:700;color:#fff;margin-top:3px;white-space:nowrap;overflow:hidden;max-width:320px}',
+      '.pv3d-title-slot-line{font-size:13px;color:#ffd166;margin-top:3px}',
+      '.pv3d-title-slot-time{font-size:12px;color:#8a8a92;margin-top:3px}',
+      '.pv3d-title-slot-track{height:6px;background:#2a2a30;margin:9px 0 8px}',
+      '.pv3d-title-slot-fill{height:100%;background:#ff8a4f}',
+      '.pv3d-title-slot-load{background:#2ec4b6;color:#08211e;border:0;padding:5px 16px;font-size:13px;font-weight:700;cursor:pointer}',
+      '.pv3d-title-slot-load:hover{background:#4fd8cb}',
+      '.pv3d-title-foot{position:absolute;left:48px;bottom:16px;font-size:13px;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,0.6)}'
     ].join('\n');
     var style = document.createElement('style');
     style.id = 'pv3d-screens-css';

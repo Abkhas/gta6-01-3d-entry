@@ -1855,6 +1855,69 @@ export function buildWorld(scene, CFG = CFG3D) {
     stats.hospitals = hospitals.length;
   }
 
+  // ---- PVPD headquarters (r10, B6) --------------------------------------
+  // BUSTED has somewhere to come back to: the police HQ in Northgate.
+  // Site verified empty against the real build (probe 24 Nov): the
+  // 60 x 36 footprint at (700,-1100) is clear of every collider, the
+  // forecourt south of it is walkable, and the spawn (700,-1070) is
+  // on foot in front of the doors, facing them. Exported as
+  // `policeHQ` for the BUSTED respawn (main3d.js).
+  const rngP = mulberry32(20261124 ^ 0x50);
+  const policeHQ = { id: 'hq', name: 'PVPD HEADQUARTERS', x: 700, z: -1100, spawn: { x: 700, z: -1070, angle: -Math.PI / 2 } };
+  {
+    const hqTex = facadeTextures('#2c3e55', '#a8c8ee', 0.4, rngP, 'concrete', rngP);
+    const hqMat = new THREE.MeshStandardMaterial({
+      map: hqTex.map, emissiveMap: hqTex.emissive,
+      emissive: new THREE.Color('#ffb45c'), emissiveIntensity: 0.15, roughness: 0.7,
+    });
+    facadeMats.push(hqMat);
+    const hq = new THREE.Mesh(new THREE.BoxGeometry(60, 16, 36), hqMat);
+    hq.position.set(700, 8, -1100);
+    hq.castShadow = true;
+    hq.receiveShadow = true;
+    group.add(hq);
+    box(62, 1.2, 38, mat('#1a2436', { roughness: 0.9 }), 700, 16.6, -1100);
+    // Blue/red PVPD stripe across the south face + fascia sign.
+    const hqStripeMat = new THREE.MeshStandardMaterial({
+      color: '#1a3cff', emissive: new THREE.Color('#1a3cff'), emissiveIntensity: 0.7, roughness: 0.5,
+    });
+    neonMats.push(hqStripeMat);
+    box(60, 1.6, 0.8, hqStripeMat, 700, 12.5, -1081.6);
+    box(60, 1.6, 0.8, mat('#c0392b', { roughness: 0.5 }), 700, 10.6, -1081.6);
+    const hqSignTex = canvasTexture(1024, 128, (g, w, h) => {
+      g.fillStyle = '#0e1a2e'; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#f2f6f8'; g.font = 'bold 56px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle';
+      g.fillText('PVPD HEADQUARTERS', 40, h / 2 + 2);
+    });
+    const hqSignMat = new THREE.MeshStandardMaterial({
+      map: hqSignTex, emissiveMap: hqSignTex, emissive: new THREE.Color('#ffffff'),
+      emissiveIntensity: 0.9, roughness: 0.7,
+    });
+    neonMats.push(hqSignMat);
+    const hqSign = new THREE.Mesh(new THREE.PlaneGeometry(34, 4.25), hqSignMat);
+    hqSign.position.set(700, 14.6, -1081.5);
+    group.add(hqSign);
+    // Entrance canopy + glass doors on the south face.
+    box(14, 0.6, 5, mat('#0e1a2e', { roughness: 0.9 }), 700, 4.4, -1079.5);
+    const hqDoorMat = new THREE.MeshStandardMaterial({
+      color: '#1c2836', metalness: 0.55, roughness: 0.25,
+      emissive: new THREE.Color('#9ab8ff'), emissiveIntensity: 0.1,
+    });
+    facadeMats.push(hqDoorMat);
+    const hqDoors = new THREE.Mesh(new THREE.PlaneGeometry(7, 3.6), hqDoorMat);
+    hqDoors.position.set(700, 1.8, -1081.7);
+    group.add(hqDoors);
+    colliders.push({ x0: 670, z0: -1118, x1: 730, z1: -1082, h: 16 });
+    buildings.push({ mesh: hq, district: districtAt(700, -1100), h: 16, x: 700, z: -1100, w: 60, d: 36 });
+    for (const [hx, hz, hw, hd] of [[700, -1100, 60, 36]]) {
+      aoSpots.push([hx, 0.25, hz + hd / 2 + 0.06, hw, 0.5, 0]);
+      aoSpots.push([hx, 0.25, hz - hd / 2 - 0.06, hw, 0.5, Math.PI]);
+      aoSpots.push([hx + hw / 2 + 0.06, 0.25, hz, hd, 0.5, Math.PI / 2]);
+      aoSpots.push([hx - hw / 2 - 0.06, 0.25, hz, hd, 0.5, -Math.PI / 2]);
+    }
+    stats.policeHQ = 1;
+  }
+
   // R9 C4: draw the collected wall-base AO strips (~1 draw call).
   if (aoSpots.length) instancedAO(aoSpots, aoMat);
 
@@ -1866,5 +1929,6 @@ export function buildWorld(scene, CFG = CFG3D) {
     updateTrafficLights, updateBeacon, setWindowGlow, setLampGlow, setNeonGlow,
     stats, // R7 build census: emptyLots, lotFills, storefronts, rooftopSigns, …
     hospitals,
+    policeHQ,
   };
 }

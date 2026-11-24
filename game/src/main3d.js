@@ -36,7 +36,7 @@ import { buildWorld } from './world3d.js';
 import { createSky, setTimeOfDay, updateSky } from './sky3d.js';
 import { createChaseCamera, CAMERA_PRESETS } from './camera3d.js';
 import { createHeroCar, createTrafficCar, createHeli } from './vehicles3d.js';
-import { createPerson } from './people3d.js';
+import { createPerson, pickProfession } from './people3d.js';
 import * as Missions3d from './missions3d.js';
 import { createPoliceSystem } from './police3d.js';
 import * as Crew3d from './crew3d.js';
@@ -195,10 +195,24 @@ function buildCityAdapter() {
       { kind: 'pier', name: 'Venn Pier', x: -1400, z: CFG3D.PIER_Z, length: CFG3D.PIER_LENGTH },
       { kind: 'wheel', name: 'Palma Wheel', x: CFG3D.BEACH_X - CFG3D.PIER_LENGTH + 90, z: CFG3D.PIER_Z },
       { kind: 'tower', name: 'Torre Brisa', x: 900, z: -900 },
-      { kind: 'tower', name: 'Hotel Miramar', x: -1100, z: -900 }
+      { kind: 'tower', name: 'Hotel Miramar', x: -1100, z: -900 },
+      { kind: 'police', name: 'PVPD Headquarters', x: 700, z: -1100 }
     ],
+    // r10 B6: the BUSTED respawn target (world.policeHQ).
+    policeHQ: world.policeHQ || null,
+    // r10: the player opens on a sidewalk in Marina — the safehouse
+    // district ("Safehouse lane" in the missions) — not in traffic.
+    // South sidewalk of the z=-600 street, mid-block (100 m from the
+    // nearest junction), facing the 31 m Marina residential block
+    // across the street (its face is 20.5 m ahead). Verified against
+    // the real world build: on the 9 m sidewalk strip, outside every
+    // collider, no lamp/palm/light within 6 m. There is no physical
+    // safehouse/save building in the world (saves are menu slots, F9),
+    // so the spawn is the safehouse district's residential frontage.
+    // The old (-800, 600) sat dead-centre of a downtown intersection
+    // (0 m from both road centrelines). Angle faces +z (the building).
     spawns: {
-      player: { x: -800, z: 600 },
+      player: { x: -900, z: -591, angle: Math.PI / 2 },
       cometa: { x: 0, z: -900 },
       pier: { x: -1450, z: CFG3D.PIER_Z },
       wheel: { x: CFG3D.BEACH_X - CFG3D.PIER_LENGTH + 90, z: CFG3D.PIER_Z },
@@ -242,7 +256,8 @@ function freshState() {
   const spawn = city.spawns.player;
   const state = {
     player: {
-      x: spawn.x, z: spawn.z, angle: 0, aim: 0, aiming: false,
+      x: spawn.x, z: spawn.z, angle: spawn.angle || 0, aim: 0, aiming: false,
+      y: 0, vy: 0, // r10 jump: height above the ground, 0 = on the ground
       health: 100, armour: 0, money: 0, weapon: 'pistol', vehicle: null,
       ammo: { pistol: 12, pistol_reserve: 60 },
       meleeT: 0, lastFireT: -99
@@ -425,10 +440,24 @@ scene.add(playerMesh);
 const pedMeshes = new Map(); // ped record -> THREE group
 const policePedMeshes = new Map(); // unit -> THREE group
 
+// Ped hair colours (shirt/skin already vary in traffic3d).
+const PED_HAIRS = ['#2c2c34', '#4a2f1d', '#111111', '#6b6b6b', '#8a6a3b', '#3a2a1a'];
+
 function personMeshFor(ped, opts) {
   let mesh = pedMeshes.get(ped);
   if (!mesh) {
-    mesh = createPerson(opts || { jacket: ped.shirt, skin: ped.color });
+    // r10 B6: a ped's profession is drawn once, when the figure is
+    // built, and sticks to the record — mostly locals, sometimes a
+    // uniformed officer or a doctor in a white coat.
+    if (!ped.profession) ped.profession = pickProfession();
+    mesh = createPerson(opts || {
+      jacket: ped.shirt, skin: ped.color,
+      profession: ped.profession,
+      // Peds read as different people, not clones: heights 1.68–1.90 m
+      // and a spread of hair colours.
+      height: 1.68 + Math.random() * 0.22,
+      hair: PED_HAIRS[Math.floor(Math.random() * PED_HAIRS.length)]
+    });
     scene.add(mesh);
     pedMeshes.set(ped, mesh);
   }
@@ -478,7 +507,9 @@ function syncPedMeshes(dt) {
     seenUnits.add(u);
     let mesh = policePedMeshes.get(u);
     if (!mesh) {
-      mesh = createPerson({ officer: true });
+      // r10 B6: officers on the street carry their pistol in hand,
+      // so the standoff reads — pointed pistols, not empty hands.
+      mesh = createPerson({ officer: true, armed: true, weapon: 'pistol' });
       scene.add(mesh);
       policePedMeshes.set(u, mesh);
     }
@@ -566,10 +597,49 @@ wastedFadeEl.id = 'pv3d-wasted-fade';
 wastedFadeEl.style.cssText = 'position:fixed;inset:0;z-index:51;display:none;pointer-events:none;background:#000;opacity:0;transition:opacity .6s ease';
 document.body.appendChild(wastedFadeEl);
 
+// BUSTED overlay (r10, B6 — owned by main3d.js, like WASTED). Same
+// beat as WASTED but a different ending: the card holds ~3 s, fades,
+// and Rey respawns on foot in front of the PVPD HEADQUARTERS
+// (world.policeHQ), NOT the hospital. No greyscale: an arrest is
+// not a death.
+const bustedEl = document.createElement('div');
+bustedEl.id = 'pv3d-busted';
+bustedEl.style.cssText = 'position:fixed;inset:0;z-index:50;display:none;pointer-events:none;text-align:center;font-family:system-ui,sans-serif';
+bustedEl.innerHTML =
+  '<div style="position:absolute;inset:0;background:radial-gradient(ellipse at center, rgba(0,0,0,0) 40%, rgba(0,0,0,.55) 100%)"></div>' +
+  '<div style="position:absolute;left:0;right:0;top:36%;font-size:96px;font-weight:900;letter-spacing:.14em;color:#e8e8e8;text-shadow:0 4px 24px rgba(0,0,0,.9)">BUSTED</div>' +
+  '<div id="pv3d-busted-sub" style="position:absolute;left:0;right:0;top:56%;font-size:16px;letter-spacing:.25em;color:#9ab8ff;text-shadow:0 2px 8px rgba(0,0,0,.9)"></div>';
+document.body.appendChild(bustedEl);
+
 const extrasEl = document.createElement('div');
 extrasEl.id = 'shot-extras';
 extrasEl.style.cssText = 'position:fixed;inset:0;z-index:25;pointer-events:none;overflow:hidden';
 document.body.appendChild(extrasEl);
+
+// Aim overlay (r10 — owned by main3d.js, NOT hud3d.js: the minimap
+// functions inside hud3d.js are untouched).
+// Crosshair: four white arms + a centre dot around a gap, each arm
+// carrying a dark outline so it reads against bright sky AND dark
+// ground. It sits exactly at the mouse position, only while aiming.
+// Ped health bar: one reused element, shown above the head of the
+// single ped the aim ray hits — never a bar over every ped.
+const crosshairEl = document.createElement('div');
+crosshairEl.id = 'pv3d-crosshair';
+crosshairEl.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:45;display:none;pointer-events:none;transform:translate(-50%,-50%)';
+crosshairEl.innerHTML =
+  '<div style="position:absolute;left:-1px;top:-11px;width:2px;height:8px;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.85)"></div>' +
+  '<div style="position:absolute;left:-1px;top:3px;width:2px;height:8px;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.85)"></div>' +
+  '<div style="position:absolute;left:-11px;top:-1px;width:8px;height:2px;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.85)"></div>' +
+  '<div style="position:absolute;left:3px;top:-1px;width:8px;height:2px;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.85)"></div>' +
+  '<div style="position:absolute;left:-1.5px;top:-1.5px;width:3px;height:3px;border-radius:50%;background:#fff;box-shadow:0 0 0 1px rgba(0,0,0,.85)"></div>';
+document.body.appendChild(crosshairEl);
+const pedHealthEl = document.createElement('div');
+pedHealthEl.id = 'pv3d-ped-health';
+pedHealthEl.style.cssText = 'position:fixed;left:0;top:0;width:46px;height:6px;z-index:45;display:none;pointer-events:none;transform:translate(-50%,-50%);background:rgba(0,0,0,.65);border:1px solid rgba(0,0,0,.85);border-radius:3px;overflow:hidden';
+const pedHealthFillEl = document.createElement('div');
+pedHealthFillEl.style.cssText = 'height:100%;width:100%;background:#37d67a';
+pedHealthEl.appendChild(pedHealthFillEl);
+document.body.appendChild(pedHealthEl);
 
 const statusEl = document.createElement('div');
 statusEl.id = 'test-status';
@@ -726,6 +796,7 @@ function applyLoadedSave(saved) {
   S.player.armour = p.armour || 0;
   S.player.money = p.money || 0;
   S.player.vehicle = null;
+  S.player.y = 0; S.player.vy = 0; // a loaded save always starts on foot, on the ground
   if (typeof saved.rp === 'number') S.rp = saved.rp;
   if (typeof saved.rank === 'number') S.rank = saved.rank;
   if (saved.missions) S.missions = saved.missions;
@@ -752,7 +823,8 @@ function applyLoadedSave(saved) {
 
 // ---------------------------------------------------------------------
 // Input. WASD drive/walk, E enter/exit + mission, Q radio, Z/X/V
-// crew, Esc pause, F9 save, T retry, Space handbrake. Hold the
+// crew, Esc pause, F9 save, T retry, Space handbrake in a car and
+// jump on foot. Hold the
 // right mouse button to aim and the left one to fire while aiming;
 // reload and the weapon wheel belong to weapons.bindInput —
 // main3d only reads the mouse world point for the aim ray.
@@ -765,8 +837,10 @@ let rmbHeld = false;
 const raycaster = new THREE.Raycaster();
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const mouseNdc = new THREE.Vector2();
+let mouseClient = null; // { x, y } viewport px of the cursor, for the crosshair
 function updateMouseWorld(e) {
   const rect = canvas.getBoundingClientRect();
+  mouseClient = { x: e.clientX, y: e.clientY };
   mouseNdc.set(
     ((e.clientX - rect.left) / rect.width) * 2 - 1,
     -((e.clientY - rect.top) / rect.height) * 2 + 1
@@ -808,12 +882,14 @@ function boardCar(car) {
   car.driver = 'player';
   S.player.x = car.x; S.player.z = car.z;
   S.player.angle = car.angle;
+  S.player.y = 0; S.player.vy = 0; // no mid-air boarding
   snapCamera();
 }
 function boardGull() {
   gull.occupied = true;
   S.player.vehicle = gull;
   S.player.x = gull.x; S.player.z = gull.z;
+  S.player.y = 0; S.player.vy = 0;
   snapCamera();
 }
 function exitVehicle() {
@@ -832,6 +908,7 @@ function exitVehicle() {
   S.player.x = v.x + rx * 3;
   S.player.z = v.z + rz * 3;
   S.player.vehicle = null;
+  S.player.y = 0; S.player.vy = 0; // step out on the ground
   snapCamera();
 }
 function doContextAction() {
@@ -897,45 +974,42 @@ function loadTitleSlot() {
 // `lastMenuSel` there lives inside that file's IIFE — it is NOT a
 // window global, so main3d cannot read it. The selected row IS
 // readable in the DOM: B1 marks it .pv3d-title-menu-selected with
-// text '▸ CONTINUE' etc. Clicks fire a synthetic Enter, so click
-// and keyboard share this one dispatch. A missing element (or
-// unknown text) falls back to CONTINUE — the pre-existing Enter
-// behaviour, so keyboard Enter is unchanged when nothing is
-// selected. While the systems screen sits over the title (SETTINGS
-// open), Enter is ignored so it cannot start the game behind it.
-const TITLE_MENU_ITEMS = ['CONTINUE', 'NEW GAME', 'LOAD GAME', 'SETTINGS'];
+// data-menu='CONTINUE' etc. (r10: the row also carries a grey
+// description line, so the label text alone no longer matches —
+// data-menu is read first, label text is only a prefix fallback).
+// Clicks fire a synthetic Enter, so click and keyboard share this
+// one dispatch. A missing element (or unknown text) falls back to
+// CONTINUE — the pre-existing Enter behaviour, so keyboard Enter is
+// unchanged when nothing is selected. While the systems screen sits
+// over the title (SETTINGS open), Enter is ignored so it cannot
+// start the game behind it.
+const TITLE_MENU_ITEMS = ['CONTINUE', 'NEW GAME', 'SETTINGS'];
 function titleMenuSelection() {
   const el = document.querySelector('.pv3d-title-menu-selected');
   if (!el) return 0;
+  const key = el.getAttribute ? el.getAttribute('data-menu') : null;
+  if (key) {
+    const ki = TITLE_MENU_ITEMS.indexOf(key);
+    if (ki !== -1) return ki;
+  }
   const text = (el.textContent || '').replace('▸', '').trim().toUpperCase();
-  const idx = TITLE_MENU_ITEMS.indexOf(text);
-  return idx === -1 ? 0 : idx;
+  for (let i = 0; i < TITLE_MENU_ITEMS.length; i++) {
+    if (text.indexOf(TITLE_MENU_ITEMS[i]) === 0) return i;
+  }
+  return 0;
 }
 function dispatchTitleMenu() {
   if (window.PalmaScreens3d && window.PalmaScreens3d.systemsVisible &&
       window.PalmaScreens3d.systemsVisible()) return;
   const sel = titleMenuSelection();
-  if (sel === 3) { // SETTINGS: systems screen on its settings tab
+  if (sel === 2) { // SETTINGS: systems screen on its settings tab
     if (window.PalmaScreens3d) {
       window.PalmaScreens3d.showSystems(S, city, { tab: 'settings', slots: Progress3d.listSaveSlots() });
     }
     return;
   }
-  if (sel === 2) { // LOAD GAME: only the selected slot; empty stays on title
-    if (!loadTitleSlot()) {
-      const payload = { kind: 'LOAD GAME', title: 'SLOT EMPTY', name: 'Slot ' + ((S.titleSlot || 0) + 1) + ' has no save', reason: 'Pick another slot' };
-      showBanner(payload);
-      // The banner only expires while playing; clear it on a timer,
-      // but only if it is still this notice (a later banner wins).
-      setTimeout(function () { if (S.banner === payload) hideBanner(); }, 3500);
-      return;
-    }
-    if (window.PalmaScreens3d && window.PalmaScreens3d.hideTitle) window.PalmaScreens3d.hideTitle();
-    S.screen = 'playing';
-    pointAtStage();
-    snapCamera();
-    return;
-  }
+  // r10: no LOAD GAME row — loading lives on the slot cards' Load
+  // buttons (and double-click), which route through CONTINUE here.
   startGameFromTitle(sel !== 1); // CONTINUE loads the slot, NEW GAME skips it
 }
 
@@ -964,6 +1038,7 @@ window.addEventListener('keydown', function (e) {
     return;
   }
   if (S.screen !== 'playing') return;
+  if (e.code === 'Space' && !e.repeat && !S.player.vehicle) { tryJump(); e.preventDefault(); }
   if (e.code === 'KeyE') doContextAction();
   if (e.code === 'KeyQ') { radio.nextStation(); S.radioStation = radio.stationIndex; S.radioTrack = radio.nowPlaying(); }
   if (e.code === 'KeyZ') useCrewAbility('tuck');
@@ -980,7 +1055,10 @@ window.addEventListener('keyup', function (e) { keys.delete(e.code); });
 // hero and looks ahead of it. Snap on enter/exit, game start and
 // shot staging so the first frame is already framed.
 // ---------------------------------------------------------------------
-const chase = createChaseCamera(camera);
+const chase = createChaseCamera(camera, {
+  // The aim lens pulls in close behind Rey: keep it out of walls.
+  isSolid: function (x, z) { return world.isSolid(x, z); }
+});
 function heroDescriptor() {
   const p = S.player;
   if (p.vehicle && p.vehicle.kind === 'heli') {
@@ -989,7 +1067,9 @@ function heroDescriptor() {
   if (p.vehicle) {
     return { position: new THREE.Vector3(p.vehicle.x, 0, p.vehicle.z), heading: p.vehicle.angle, speed: Math.abs(p.vehicle.speed || 0), mode: 'car' };
   }
-  return { position: new THREE.Vector3(p.x, 0, p.z), heading: p.angle, speed: walkSpeed, mode: 'foot' };
+  // On foot the heading is the aim while aiming (stepOnFoot turns
+  // the player to p.aim), so the aim lens looks where Rey aims.
+  return { position: new THREE.Vector3(p.x, 0, p.z), heading: p.angle, speed: walkSpeed, mode: 'foot', aiming: !!p.aiming };
 }
 function snapCamera() {
   const hero = heroDescriptor();
@@ -997,6 +1077,7 @@ function snapCamera() {
   S.cam = { x: hero.position.x, z: hero.position.z };
 }
 let walkSpeed = 0;
+let walkDirX = 1, walkDirZ = 0; // last on-foot movement direction (unit vector)
 
 // ---------------------------------------------------------------------
 // Per-frame mesh sync. Traffic/police create bodies but never add
@@ -1047,13 +1128,26 @@ function syncWorldMeshes(dt) {
     playerMesh.visible = false;
   } else {
     playerMesh.visible = true;
-    playerMesh.position.set(p.x, 0, p.z);
+    playerMesh.position.set(p.x, p.y || 0, p.z);
     playerMesh.rotation.y = -p.angle;
     let pose = 'idle';
-    if (p.aiming) pose = 'aim';
+    // r10 B6: the WASTED body lies PRONE where it fell — flat on its
+    // back, at the death spot, for the whole card, until the hospital
+    // respawn. The old code left the figure standing idle under the
+    // card (Khase played it: body still upright).
+    if (death) pose = 'down';
+    else if (p.aiming) pose = 'aim';
     else if (walkSpeed > 5.5) pose = 'run';
     else if (walkSpeed > 0.15) pose = 'walk';
-    if (playerMesh.userData.update) playerMesh.userData.update(dt, walkSpeed, pose);
+    // Signed speed: forward is +walkSpeed; S while aiming backpedals
+    // (negative), so the figure plays the backpedal cycle instead of
+    // moonwalking a forward walk. Not aiming, the figure turns to
+    // face the movement, so the dot is +1 by construction.
+    const walkSigned = walkSpeed * (Math.cos(p.angle) * walkDirX + Math.sin(p.angle) * walkDirZ);
+    // The figure always shows the equipped slot: the pistol is in
+    // Rey's hand (fists hides it, switching swaps the mesh).
+    if (playerMesh.userData.setWeapon) playerMesh.userData.setWeapon(p.weapon);
+    if (playerMesh.userData.update) playerMesh.userData.update(dt, walkSigned, pose);
   }
   // Hero car + traffic cars. In shot mode the live hero car stays
   // hidden: the staged state carries its own hero record.
@@ -1070,6 +1164,7 @@ function syncWorldMeshes(dt) {
       else if (u.car) { u.body = ensureCarBody(u.car); syncCarBody(u, dt); }
     }
     if (S.police.heli) syncHeliBody(S.police.heli, dt, 14);
+    if (S.police.heli2) syncHeliBody(S.police.heli2, dt, 14);
   }
   // The Gull. In shot mode the live Gull stays hidden: the staged
   // state carries its own Gull record (heli shot).
@@ -1180,6 +1275,20 @@ function footBlockedAt(x, z) {
   }
   return false;
 }
+// Jump (r10): Space on foot only — never in a car, where Space is
+// the handbrake. A small hop: vy starts it, gravity pulls it back,
+// and the player lands flat on y=0, never through the ground.
+// Horizontal collision is unchanged while airborne (footBlockedAt
+// is 2D), so a jump cannot carry the player through a building or a
+// car — it just bumps them against it. ~0.75 m high, ~0.66 s air.
+const JUMP_V = 4.6; // m/s up
+const JUMP_G = 14;  // m/s^2 down
+function tryJump() {
+  const p = S.player;
+  if (p.vehicle) return;
+  if ((p.y || 0) > 0 || (p.vy || 0) !== 0) return; // already airborne
+  p.vy = JUMP_V;
+}
 function stepOnFoot(dt) {
   const p = S.player;
   const camDir = new THREE.Vector3(p.x - camera.position.x, 0, p.z - camera.position.z);
@@ -1197,6 +1306,7 @@ function stepOnFoot(dt) {
   walkSpeed += (target - walkSpeed) * Math.min(1, dt * 8);
   if (len > 0) {
     mx /= len; mz /= len;
+    walkDirX = mx; walkDirZ = mz;
     const nx = p.x + mx * walkSpeed * dt;
     const nz = p.z + mz * walkSpeed * dt;
     // Axis-separated, so a blocked axis slides along the obstacle.
@@ -1210,6 +1320,13 @@ function stepOnFoot(dt) {
     p.z = Math.max(-CFG3D.CITY_HALF, Math.min(CFG3D.CITY_HALF, p.z));
   }
   if (p.aiming) p.angle = p.aim;
+  // Jump arc (r10): runs even with no movement keys held. Gravity
+  // while airborne, land flat on y=0.
+  if ((p.y || 0) > 0 || (p.vy || 0) !== 0) {
+    p.vy = (p.vy || 0) - JUMP_G * dt;
+    p.y = (p.y || 0) + p.vy * dt;
+    if (p.y <= 0) { p.y = 0; p.vy = 0; }
+  }
 }
 function stepCar(dt) {
   const car = S.player.vehicle;
@@ -1279,6 +1396,77 @@ function projectToScreen(x, y, z) {
     y: (-v.y * 0.5 + 0.5) * window.innerHeight
   };
 }
+
+// ---------------------------------------------------------------------
+// Aim overlay (r10): crosshair at the mouse + health bar over the
+// one ped the aim ray hits. Pure geometry, no raycast against the
+// scene: the aim ray is the player's aim heading on the ground
+// plane, and a ped counts as targeted when it lies within a narrow
+// corridor around that ray. Same corridor the shot system uses in
+// spirit (weapons pickTarget: nearest in-range target inside the
+// aim cone), so the bar and the bullet agree on the target.
+// ---------------------------------------------------------------------
+const AIM_TARGET_RANGE = 80; // m — the bar is a spotting aid, not the shot range
+const AIM_TARGET_HALF_WIDTH = 0.9; // m across the ray at the ped
+function findAimTarget() {
+  const p = S.player;
+  if (!p || p.vehicle) return null;
+  const dx = Math.cos(p.aim), dz = Math.sin(p.aim);
+  let best = null, bestAlong = AIM_TARGET_RANGE;
+  const consider = function (ped) {
+    if (!ped || ped.down || (typeof ped.health === 'number' && ped.health <= 0)) return;
+    const rx = ped.x - p.x, rz = ped.z - p.z;
+    const along = rx * dx + rz * dz;
+    if (along < 0.5 || along >= bestAlong) return;
+    const perp = Math.abs(-rx * dz + rz * dx);
+    // The corridor widens slightly with distance: a ped 40 m out
+    // is a smaller screen target, so the tolerance grows with range.
+    if (perp > AIM_TARGET_HALF_WIDTH + along * 0.01) return;
+    best = ped; bestAlong = along;
+  };
+  for (const ped of S.peds || []) consider(ped);
+  // Police foot officers are peds too (u.ped) — same bar, same rule.
+  for (const u of (S.police && S.police.units) || []) if (u.ped) consider(u.ped);
+  return best ? { ped: best, along: bestAlong } : null;
+}
+function updateAimOverlay() {
+  const p = S.player;
+  const aiming = S.screen === 'playing' && !death && !!p && !p.vehicle && !!p.aiming;
+  // Crosshair: exactly at the mouse while aiming, nowhere otherwise.
+  if (aiming && mouseClient) {
+    crosshairEl.style.display = 'block';
+    crosshairEl.style.left = mouseClient.x + 'px';
+    crosshairEl.style.top = mouseClient.y + 'px';
+  } else {
+    crosshairEl.style.display = 'none';
+  }
+  // Health bar: only the targeted ped, above their head, green->red.
+  let target = null;
+  if (aiming) target = findAimTarget();
+  if (target) {
+    const hp = Math.max(0, Math.min(100, typeof target.ped.health === 'number' ? target.ped.health : 100));
+    const pt = projectToScreen(target.ped.x, 2.15, target.ped.z);
+    if (pt) {
+      pedHealthEl.style.display = 'block';
+      pedHealthEl.style.left = pt.x + 'px';
+      pedHealthEl.style.top = pt.y + 'px';
+      pedHealthFillEl.style.width = hp + '%';
+      // Hue 120 (green) at full health -> 0 (red) at empty.
+      pedHealthFillEl.style.background = 'hsl(' + Math.round(hp * 1.2) + ',85%,45%)';
+    } else {
+      pedHealthEl.style.display = 'none';
+    }
+  } else {
+    pedHealthEl.style.display = 'none';
+  }
+  // Probe for the flow/self test: what the aim overlay is showing.
+  window.__pv3d.aim = {
+    aiming: aiming,
+    targetHealth: target ? Math.max(0, Math.min(100, typeof target.ped.health === 'number' ? target.ped.health : 100)) : null,
+    aimWeight: chase && typeof chase.aimWeight === 'number' ? +chase.aimWeight.toFixed(3) : null
+  };
+}
+
 function chip(text, x, y, style) {
   const d = document.createElement('div');
   d.textContent = text;
@@ -1482,13 +1670,14 @@ function respawnFromDeath() {
   const d = death;
   const p = S.player;
   const hospital = d.hospital || nearestHospital(p.x, p.z);
-  const spawn = hospital ? hospital.spawn : { x: city.spawns.player.x, z: city.spawns.player.z, angle: 0 };
+  const spawn = hospital ? hospital.spawn : { x: city.spawns.player.x, z: city.spawns.player.z, angle: city.spawns.player.angle || 0 };
   p.money = Math.max(0, (p.money || 0) - d.fee);
   p.health = 100;
   p.x = spawn.x;
   p.z = spawn.z;
   p.angle = spawn.angle || 0;
   p.aim = p.angle;
+  p.y = 0; p.vy = 0; // revive on the ground, never mid-hop
   p.vehicle = null;
   S.wanted = 0;
   weapons.setAiming(false);
@@ -1502,6 +1691,76 @@ function respawnFromDeath() {
   snapCamera();
   setHudMsg('REVIVED AT ' + (hospital ? hospital.name : 'PALMA VERDE GENERAL') +
     (d.fee > 0 ? ' — FEE $' + d.fee : ' — NO FEE'), 4);
+}
+
+// ---------------------------------------------------------------------
+// BUSTED + police-HQ revive (r10, B6) — the arrest beat.
+//   trigger: police3d.js applyBusted — a foot officer holds Rey
+//     within 15 m for 1.2 s, OR Rey holds still surrounded by aiming
+//     officers for 6 s (BUSTED_STILL_S)
+//   card: BUSTED card (no greyscale), ~3 s hold
+//   fade: to black, then respawn on foot in front of the PVPD
+//     HEADQUARTERS (world.policeHQ, Northgate), full health, wanted
+//     cleared, mission failed. The fine was already taken by
+//     police3d.js applyBusted — main3d must NOT take it again.
+//   While busted the player cannot move, shoot or be re-hit, exactly
+//   like the death beat; traffic + day/night keep running.
+// ---------------------------------------------------------------------
+const BUSTED_HOLD_S = 3.0;
+const BUSTED_RESPAWN_S = 3.8;
+let bustedState = null; // { elapsed, fee, hq, faded } while arrested
+
+function nearestPoliceHQ(x, z) {
+  return world.policeHQ || null;
+}
+
+function startBusted(fine) {
+  if (bustedState || death) return;
+  const p = S.player;
+  const hq = nearestPoliceHQ(p.x, p.z);
+  bustedState = { elapsed: 0, fee: fine || 0, hq: hq, faded: false };
+  const v = p.vehicle;
+  if (v) {
+    if (v.kind === 'heli') v.occupied = false;
+    else { v.traffic = !v.hero; v.driver = null; v.speed = 0; }
+    p.vehicle = null;
+  }
+  weapons.setAiming(false);
+  mouseHeld = false;
+  rmbHeld = false;
+  S.wanted = 0;
+  const sub = document.getElementById('pv3d-busted-sub');
+  if (sub) sub.textContent = (hq ? hq.name : 'PVPD HEADQUARTERS') +
+    (bustedState.fee > 0 ? ' — FINE $' + bustedState.fee : ' — NO FINE');
+  bustedEl.style.display = 'block';
+  wastedFadeEl.style.display = 'block';
+  wastedFadeEl.style.opacity = '0';
+}
+
+function respawnFromBusted() {
+  if (!bustedState) return;
+  const d = bustedState;
+  const p = S.player;
+  const hq = d.hq || nearestPoliceHQ(p.x, p.z);
+  const spawn = hq ? hq.spawn : { x: city.spawns.player.x, z: city.spawns.player.z, angle: city.spawns.player.angle || 0 };
+  p.health = 100;
+  p.x = spawn.x;
+  p.z = spawn.z;
+  p.angle = spawn.angle || 0;
+  p.aim = p.angle;
+  p.y = 0; p.vy = 0;
+  p.vehicle = null;
+  S.wanted = 0;
+  weapons.setAiming(false);
+  mouseHeld = false;
+  rmbHeld = false;
+  bustedState = null;
+  bustedEl.style.display = 'none';
+  wastedFadeEl.style.display = 'none';
+  wastedFadeEl.style.opacity = '0';
+  snapCamera();
+  setHudMsg('RELEASED AT ' + (hq ? hq.name : 'PVPD HEADQUARTERS') +
+    (d.fee > 0 ? ' — FINE $' + d.fee : ' — NO FINE'), 4);
 }
 
 // Street damage (r8, B4): the two damage sources that can actually
@@ -1580,6 +1839,18 @@ function tick() {
         wastedFadeEl.style.opacity = '1';
       }
       if (death.elapsed >= WASTED_RESPAWN_S) respawnFromDeath();
+    } else if (bustedState) {
+      // Arrested: same frozen beat as death (traffic + day/night
+      // behind the card), then the fade and the HQ respawn.
+      bustedState.elapsed += dt;
+      traffic.update(dt, p, { time: S.time, nightF: daynight.stars });
+      S.cars = traffic.cars;
+      S.peds = traffic.peds;
+      if (bustedState.elapsed >= BUSTED_HOLD_S && !bustedState.faded) {
+        bustedState.faded = true;
+        wastedFadeEl.style.opacity = '1';
+      }
+      if (bustedState.elapsed >= BUSTED_RESPAWN_S) respawnFromBusted();
     } else {
     // Aim only while the right mouse button is held, on foot.
     // weapons.setAiming is the one writer of the aiming flag: the
@@ -1613,9 +1884,11 @@ function tick() {
       missionId: S.missions.current,
       onWanted: function (w) { S.wanted = w; },
       onBusted: function (info) {
-        S.player.money = Math.max(0, S.player.money - (info.fine || 0));
-        showBanner({ kind: 'BUSTED', title: 'BUSTED', name: 'The PVPD takes its cut', reason: 'Fine $' + (info.fine || 0) });
-        if (info.missionId) Missions3d.failMission(S, 'busted', missionHooks);
+        // r10 B6: the fine was already taken by police3d.js
+        // applyBusted — taking it here again double-charged Rey.
+        // The arrest beat (card + HQ respawn) starts here; the
+        // mission fails via onMissionFailed below.
+        startBusted(info.fine || 0);
       },
       onMissionFailed: function (reason) { Missions3d.failMission(S, reason, missionHooks); },
       onEvent: function (st, kind, payload) {
@@ -1642,9 +1915,11 @@ function tick() {
       }
     }
 
-    // Street damage, then the death trigger.
+    // Street damage, then the death trigger. r10 B6: below 5 HP Rey
+    // falls — hit or not, the body goes down and lies WASTED; there
+    // is no "alive at 3 HP, still standing" state.
     applyStreetDamage(dt);
-    if (S.player.health <= 0) startDeath();
+    if (S.player.health <= 5) startDeath();
     } // end of the else (not dying)
 
     // District + standing for the HUD chip.
@@ -1671,6 +1946,12 @@ function tick() {
     // Frozen world behind the systems screen; keep the sky alive.
     updateSky(scene, dt);
   }
+
+  // Aim overlay: crosshair + targeted-ped health bar. Runs every
+  // frame (not at HUD 15 Hz) so the crosshair tracks the mouse and
+  // the bar tracks a moving ped; it hides itself whenever the
+  // player is not aiming, dead, driving, paused or on the title.
+  updateAimOverlay();
 
   syncWorldMeshes(dt);
   renderer.render(scene, camera);
@@ -1735,6 +2016,7 @@ window.__palma3d = {
   hud: hud,
   get clockHours() { return clockHours; },
   get deathActive() { return !!death; },
+  get bustedActive() { return !!bustedState; },
   setClockHours: function (h) { clockHours = h; daynight.setTime(h); }
 };
 

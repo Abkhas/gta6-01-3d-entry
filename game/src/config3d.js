@@ -156,7 +156,7 @@ export const CFG3D = {
     SHADOW_MAP_SIZE: 1024,     // was 2048 over ±1600 m
     SHADOW_FOLLOW_DIST: 1200,  // sun light rides this far out along the sun ray
     SHADOW_SNAP: 8,            // snap the follow focus to this grid (m) — no shimmer
-    SHADOW_DEFAULT_FOCUS: { x: -800, z: 600 }, // player spawn (title screen)
+    SHADOW_DEFAULT_FOCUS: { x: -900, z: -591 }, // player spawn (title screen)
     SHADOW_NORMAL_BIAS: 0.03, // r9 A4: kills acne on rounded geometry; shadow.radius is ignored under PCFSoft in r160 — do NOT use it, do NOT switch to VSM
     DPR_LEVELS: [2, 1.5, 1.25], // r9 A2: floor is 1.25, never 1 — DPR 1 at 1280x720 is visibly pixelated
     DPR_MIN: 1.25,              // live-play floor (governor never steps below this)

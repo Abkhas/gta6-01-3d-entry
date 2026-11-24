@@ -8,8 +8,14 @@
 // road only on a zebra at one of the 22 signalled junctions, waiting
 // at the kerb for the walk signal — there is no jaywalking. Cars stick to their
 // (correct, right-hand) side of the road, stop at red lights, brake
-// and honk behind the player, and steer around a blocked car instead
-// of sitting on the horn forever. Pedestrians scatter when shots ring
+// and honk behind the player, follow the car ahead at a bumper gap
+// instead of freezing 35 m back (so a queue discharges as a platoon
+// when the light turns green, not one car at a time), and steer
+// around a blocked car instead of sitting on the horn forever.
+// A car that waits behind a genuinely stalled leader mid-block
+// pulls out and passes it after a few seconds; a queue at a red
+// light never triggers a pass. Fresh movers spawn spread across
+// approaches instead of on top of an existing queue.
 // out — most flee, some duck, a stubborn few fight back.
 //
 // Units are metres and seconds. Roads run on the 200 m grid from
@@ -57,6 +63,13 @@ const BEACH_PEDS = 18;
 const MARKET_PEDS = 24;
 const SIDEWALK_PEDS = 44;
 const LANE_OFFSET = 3.5; // metres off the centreline, right-hand lane
+// Queue follow (r10): centre-to-centre gap a follower closes to
+// behind its leader — about a 4 m bumper gap for a 4.6 m car —
+// then it rolls at the leader's speed instead of freezing.
+const FOLLOW_GAP = 8.5;
+// Seconds stopped tight behind a stalled leader before pulling out
+// and passing it (mid-block only, never a queue at a red).
+const FOLLOW_WAIT_S = 8;
 
 // ---- downed peds ----------------------------------------------------------
 // A ped shot down lies where it fell and fades after ~25 s — a body in
@@ -359,7 +372,7 @@ export function createTraffic(world, vehicles) {
       moped: !!o.moped,
       parkedRow: !!o.parkedRow,
       cruise: o.cruise || 12 + Math.random() * 8,
-      wait: 0, blocked: 0, playerBlock: 0, goAroundT: 0, goAroundSide: 1,
+      wait: 0, blocked: 0, playerBlock: 0, goAroundT: 0, goAroundSide: 1, passTarget: null,
       honk: false, damage: 0, body,
     };
     if (body) {
@@ -433,6 +446,11 @@ export function createTraffic(world, vehicles) {
   // The road spot nearest a ring point, with a travel direction along
   // it: the snapped coordinate says which road it is (x snapped =
   // north-south road, travel along z; z snapped = east-west road).
+  // The spot sits IN the right-hand lane (same offset laneTarget
+  // steers to), not on the centreline: a car born on the centreline
+  // sits 3.5 m from both lanes and can deadlock oncoming traffic
+  // while it merges, since carAhead's lateral test counts 3.5 m as
+  // "ahead" for both directions.
   function ringRoadSpot(player, rng) {
     const r = rng || Math.random;
     const p = ringPoint(player, r);
@@ -441,7 +459,48 @@ export function createTraffic(world, vehicles) {
     const angle = onNSRoad
       ? (r() < 0.5 ? Math.PI / 2 : -Math.PI / 2)
       : (r() < 0.5 ? 0 : Math.PI);
-    return { x: snapped.x, z: snapped.z, angle };
+    if (onNSRoad) {
+      const dir = Math.sin(angle) >= 0 ? 1 : -1;
+      return { x: snapped.x - dir * LANE_OFFSET, z: snapped.z, angle };
+    }
+    const dir = Math.cos(angle) >= 0 ? 1 : -1;
+    return { x: snapped.x, z: snapped.z + dir * LANE_OFFSET, angle };
+  }
+
+  // Is the pass lane clear ahead of this car? The pass always pulls
+  // to local lateral -7 m (the other lane — laneTarget's -LANE_OFFSET
+  // side, in all four directions), so a car sitting 4–10 m out on
+  // that side within 45 m ahead is in the way. The car being passed
+  // (leader) sits in our own lane (lateral ~0) and never counts.
+  function passLaneClear(player, car, leader) {
+    const ca = Math.cos(car.angle), sa = Math.sin(car.angle);
+    const clearOf = function (o) {
+      if (!o || o === car || o === leader || o.parkedRow) return true;
+      const dx = o.x - car.x, dz = o.z - car.z;
+      const d = Math.sqrt(dx * dx + dz * dz);
+      if (d > 45 || d < 2) return true;
+      const along = dx * ca + dz * sa;
+      if (along < 0) return true;
+      const lat = -dx * sa + dz * ca;
+      return lat < -10 || lat > -4;
+    };
+    for (const o of sys.cars) if (!o.traffic || !clearOf(o)) return false;
+    if (player.vehicle && !clearOf(player.vehicle)) return false;
+    return true;
+  }
+
+  // Is this ring spot already crowded with movers heading the same
+  // way? A fresh spawn on top of an existing queue just lengthens
+  // it, so the fleet spreads across approaches instead of stacking
+  // on one light. The cap never moves — only where the next car
+  // appears does.
+  function spotCrowded(spot, angle) {
+    for (const o of sys.cars) {
+      if (!o.traffic || o.parkedRow) continue;
+      if (Math.abs(angDiff(o.angle, angle)) > 0.5) continue;
+      if (dist2(o.x, o.z, spot.x, spot.z) < 70) return true;
+    }
+    return false;
   }
 
   // A moving car: spawned in the ring around the player, so the streets
@@ -449,7 +508,8 @@ export function createTraffic(world, vehicles) {
   // empty everywhere. The recycle pass keeps it there.
   function spawnMover(player, rng) {
     const r = rng || rngFor(sys.rngSeed);
-    const spot = ringRoadSpot(player, r);
+    let spot = ringRoadSpot(player, r);
+    for (let tries = 0; tries < 3 && spotCrowded(spot, spot.angle || 0); tries++) spot = ringRoadSpot(player, r);
     const model = CAR_MODELS[Math.floor(r() * CAR_MODELS.length)];
     const car = makeCarRecord(model, spot.x, spot.z, spot.angle || 0, {});
     sys.cars.push(car);
@@ -460,7 +520,8 @@ export function createTraffic(world, vehicles) {
   // so the renderer draws a slim two-wheeler with a rider.
   function spawnMoped(player, rng) {
     const r = rng || rngFor(sys.rngSeed + 7);
-    const spot = ringRoadSpot(player, r);
+    let spot = ringRoadSpot(player, r);
+    for (let tries = 0; tries < 3 && spotCrowded(spot, spot.angle || 0); tries++) spot = ringRoadSpot(player, r);
     const car = makeCarRecord('olas', spot.x, spot.z, spot.angle || 0, { moped: true, cruise: 15 + r() * 6 });
     sys.cars.push(car);
     return car;
@@ -856,8 +917,19 @@ export function createTraffic(world, vehicles) {
 
   // What is directly ahead of this car, inside its lane: a moving car
   // or the player's vehicle. Parked cars are skipped (they sit in bays
-  // at the kerb); a car in the next lane is skipped by the lateral test.
+  // at the kerb). The lateral test is 4 m, not the lane width: lane
+  // centres sit 7 m apart (±3.5 m off the centreline), so a car in
+  // the ONCOMING lane is 7 m to the side — with a wider test every
+  // passing car read as "ahead", both directions stopped for each
+  // other nose-to-nose, and the queue behind them never moved. At
+  // 4 m a same-lane car (0–2 m off) and a car mid-pass (3.5 m off)
+  // still count, but the opposite lane never does. The match is the
+  // NEAREST car ahead, not the first in the array: the follow law
+  // below brakes on the returned distance, and following a car 20 m
+  // away while the car 6 m ahead is ignored drives straight through
+  // it.
   function carAhead(player, car) {
+    let best = null;
     for (const o of sys.cars) {
       if (o === car || o.parkedRow) continue;
       if (o.speed === 0 && !o.traffic) continue;
@@ -868,9 +940,10 @@ export function createTraffic(world, vehicles) {
       const dot = (dx * Math.cos(car.angle) + dz * Math.sin(car.angle)) / d;
       if (dot < 0.82) continue;
       const perp = Math.abs(-dx * Math.sin(car.angle) + dz * Math.cos(car.angle));
-      if (perp > 8) continue;
-      return { kind: 'car' };
+      if (perp > 4) continue;
+      if (!best || d < best.dist) best = { kind: 'car', car: o, dist: d, speed: o.speed || 0 };
     }
+    if (best) return best;
     const pv = player.vehicle;
     if (pv && pv !== car) {
       const pdx = pv.x - car.x;
@@ -879,7 +952,7 @@ export function createTraffic(world, vehicles) {
       if (pd < 35 && pd > 2) {
         const pdot = (pdx * Math.cos(car.angle) + pdz * Math.sin(car.angle)) / pd;
         const pperp = Math.abs(-pdx * Math.sin(car.angle) + pdz * Math.cos(car.angle));
-        if (pdot > 0.82 && pperp <= 8) return { kind: 'player' };
+        if (pdot > 0.82 && pperp <= 4) return { kind: 'player', dist: pd, speed: 0 };
       }
     }
     return null;
@@ -891,8 +964,13 @@ export function createTraffic(world, vehicles) {
   // target behind it and turned around. A car far from any centreline
   // (beach road, a lot) just holds its heading.
   function laneTarget(car) {
-    const aheadX = car.x + Math.cos(car.angle) * 30;
-    const aheadZ = car.z + Math.sin(car.angle) * 30;
+    // A pass aims 12 m out, not 30: the sharper turn gets the car
+    // into the other lane before it draws level with the car it is
+    // passing (at 30 m the turn is so shallow it is still alongside
+    // when it arrives — a sideswipe, not a pass).
+    const look = car.goAroundT > 0 ? 12 : 30;
+    const aheadX = car.x + Math.cos(car.angle) * look;
+    const aheadZ = car.z + Math.sin(car.angle) * look;
     const block = CFG.BLOCK || 200;
     const half = (CFG.ROAD_WIDTH || 14) / 2 + (CFG.SIDEWALK || 4) + 6;
     const off = car.goAroundT > 0 ? -LANE_OFFSET * (car.goAroundSide || 1) : LANE_OFFSET;
@@ -955,33 +1033,97 @@ export function createTraffic(world, vehicles) {
         }
       }
     }
-    // Something in our lane: brake. Behind the player, wait a beat,
+    // Something in our lane. Behind the player: stop, wait a beat,
     // honk, then steer around instead of sitting there forever.
+    // Behind another car: FOLLOW it — close to a bumper gap, then
+    // roll with it at its speed. The old code stopped dead the
+    // moment any car was within 35 m, so a queue discharged one car
+    // per 35 m of travel and the back of it waited through several
+    // greens; now the whole queue pulls up tight and rolls through
+    // the green as a platoon.
     const ahead = carAhead(player, car);
     if (ahead) {
-      want = 0;
       if (ahead.kind === 'player') {
+        want = 0;
+        car.followWait = 0;
         car.playerBlock = (car.playerBlock || 0) + dt;
         if (car.playerBlock > 1.5) car.honk = true;
         // No going around while waiting at a red: the car stays in
         // its lane behind the player until the light turns green.
-        if (car.playerBlock > 2.2 && !car.goAroundT && !car.redJunction) {
+        // Side is always 1: laneTarget builds the pass lane as
+        // -LANE_OFFSET * side, and the normal lane is +LANE_OFFSET
+        // on this heading — so side -1 reproduces the normal lane
+        // and the car would drive straight through the blocker
+        // (the go-around overwrites want after the follow check).
+        // Side 1 is the other lane in all four directions. The
+        // pass only starts when the other lane is clear ahead.
+        if (car.playerBlock > 2.2 && !car.goAroundT && !car.redJunction && passLaneClear(player, car, player.vehicle)) {
           car.goAroundT = 2.6;
-          car.goAroundSide = Math.random() < 0.5 ? 1 : -1;
+          car.goAroundSide = 1;
+          car.passTarget = player.vehicle;
         }
-      } else {
+      } else if (ahead.dist < FOLLOW_GAP) {
+        want = 0;
         car.playerBlock = 0;
         car.honk = false;
+        car.followWait = (car.followWait || 0) + dt;
+      } else {
+        want = Math.min(want, (ahead.speed || 0) + (ahead.dist - FOLLOW_GAP) * 0.55);
+        car.playerBlock = 0;
+        car.honk = false;
+        // Stopped tight behind a stopped leader: the gap closes
+        // asymptotically onto FOLLOW_GAP and the speed snaps to 0 a
+        // hair short of it, so "gap < FOLLOW_GAP" alone never fires
+        // — count the wait once the car is effectively stopped
+        // (speed < 0.5) within 1.5 m of the bumper gap.
+        if ((ahead.speed || 0) < 0.5 && car.speed < 0.5 && ahead.dist < FOLLOW_GAP + 1.5) {
+          car.followWait = (car.followWait || 0) + dt;
+        } else {
+          car.followWait = 0;
+        }
       }
     } else {
       car.playerBlock = 0;
       car.honk = false;
+      car.followWait = 0;
+    }
+    // Stalled leader, mid-block: after FOLLOW_WAIT_S stopped tight
+    // behind a car that is not moving, pull out and pass it — one
+    // dead car must not freeze the lane. Never a queue at a red
+    // (the leader is latched to its light or facing one), never near
+    // a junction, never while fleeing gunfire. The pass itself uses
+    // the existing go-around (goAroundT), which the red handling
+    // below already suppresses at a light.
+    if (ahead && ahead.kind === 'car' && !fleeing && !car.redJunction && !car.goAroundT &&
+        (car.followWait || 0) > FOLLOW_WAIT_S && (ahead.speed || 0) < 0.5 &&
+        !junctionAhead(car) && ahead.car && !ahead.car.redJunction && !lightIsRed(ahead.car) &&
+        passLaneClear(player, car, ahead.car)) {
+      car.goAroundT = 2.6;
+      car.goAroundSide = 1; // the lane-changing side (see above)
+      car.passTarget = ahead.car;
+      car.followWait = 0;
     }
     // Committed to the pass: pull out half a lane and go around —
     // unless the light ahead is red, in which case the pass waits.
+    // A car that moved into the pass lane after the pass started
+    // (oncoming traffic) aborts it: the pass never drives through
+    // another car. The car being passed (passTarget) doesn't count
+    // — it is falling behind to the side.
     if (car.goAroundT > 0) {
       car.goAroundT -= dt;
-      if (!car.redJunction) want = car.cruise * 0.6;
+      if (!car.redJunction) {
+        const block = carAhead(player, car);
+        const blockedBy = !!block && block.dist < 12 && (
+          (block.kind === 'car' && block.car !== car.passTarget) ||
+          (block.kind === 'player' && player.vehicle !== car.passTarget)
+        );
+        if (blockedBy) {
+          car.goAroundT = 0;
+          car.passTarget = null;
+        } else {
+          want = car.cruise * 0.6;
+        }
+      }
     }
     // Blocked ahead: wait a beat, then swing onto the crossing road.
     // Not while waiting at a red — a car at the line is waiting, not
@@ -1003,7 +1145,14 @@ export function createTraffic(world, vehicles) {
     // Ease toward the wanted speed, braking harder than accelerating.
     const rate = want < car.speed ? 2.6 : 1.1;
     car.speed += (want - car.speed) * Math.min(1, rate * dt);
-    if (Math.abs(car.speed) < 0.25) car.speed = 0;
+    // Settle at a stop — but only when the car is MEANT to be stopped.
+    // The bare snap used to fire whenever |speed| < 0.25, including
+    // while accelerating from rest toward a small want: one step's
+    // increment (want x 0.055) is below 0.25 for any want under ~4.5,
+    // so a follower asked to creep up at want 4 never moved at all
+    // and the queue never pulled up tight. Now the snap only fires
+    // when want is ~0 too, so a creeping car accumulates speed.
+    if (Math.abs(car.speed) < 0.25 && want < 0.25) car.speed = 0;
     // Step forward, sliding past anything solid instead of sticking.
     const nx = car.x + Math.cos(car.angle) * car.speed * dt;
     const nz = car.z + Math.sin(car.angle) * car.speed * dt;
