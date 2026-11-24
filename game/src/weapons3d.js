@@ -30,6 +30,11 @@
 //     consume ammo and report 'miss'.
 //   onShot(result) — every shot, hit or miss; the police system
 //     listens here to raise wanted.
+//   tracer(tracer) — every gunshot, with the dashed yellow line from
+//     the muzzle to the hit point (or the crosshair ray target on a
+//     miss); the renderer draws it from this hook (see
+//     createTracerRenderer). The shot result also carries it as
+//     result.tracer, and live tracers sit on sys.tracers.
 //   onCrime(kind) — 'assault' for a melee hit on someone.
 //   onEmpty(weaponId), onReload(weaponId)
 //   flash(x, z, angle), shake(amount) — renderer effects.
@@ -56,6 +61,40 @@ export function isMelee(id) {
   return weaponDef(id).mag === 0;
 }
 
+// Bullet tracer (r11-B4): a thin yellow SEGMENTED line — short dashes
+// with gaps, never a solid beam — from the muzzle to the hit point
+// (or the crosshair ray target on a miss). It lives TRACER_LIFE and
+// fades; the renderer draws it from the `tracer` hook (or from
+// createTracerRenderer below). Pure data, no THREE here, so the
+// headless self-test can check it.
+export const TRACER_LIFE = 0.12; // s — one brief streak per shot
+export const MUZZLE_Y = 1.3; // m — muzzle height, same as the flash
+export const TARGET_Y = 1.2; // m — chest height on a ped
+export const TRACER_DASH = 0.9; // m of line per dash
+export const TRACER_GAP = 0.6; // m of gap between dashes
+export const TRACER_MAX_DASHES = 40; // cap: a 350 m miss still draws at most ~60 m of dashes
+
+// Dash segments along the 3D line from→to: [{ from: {x,y,z}, to: {x,y,z} }].
+// Gaps are real gaps in the geometry — the line reads as a tracer,
+// not a beam. Pure function, exported for the headless test.
+export function buildTracerSegments(from, to) {
+  const dx = to.x - from.x, dy = to.y - from.y, dz = to.z - from.z;
+  const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (!(len > 0.001)) return [];
+  const ux = dx / len, uy = dy / len, uz = dz / len;
+  const segs = [];
+  let s = 0;
+  while (s < len && segs.length < TRACER_MAX_DASHES) {
+    const e = Math.min(s + TRACER_DASH, len);
+    segs.push({
+      from: { x: from.x + ux * s, y: from.y + uy * s, z: from.z + uz * s },
+      to: { x: from.x + ux * e, y: from.y + uy * e, z: from.z + uz * e },
+    });
+    s = e + TRACER_GAP;
+  }
+  return segs;
+}
+
 export function giveAmmo(player, weaponId, amount) {
   if (!player.ammo) player.ammo = {};
   player.ammo[weaponId] = (player.ammo[weaponId] || 0) + amount;
@@ -70,6 +109,9 @@ export function createWeapons(player, hooks) {
     wheelOpen: false,
     firing: false,
     time: 0,
+    tracers: [], // r11-B4: live bullet tracers (fade in TRACER_LIFE)
+    _aimX: null, // r11-B4: last crosshair ground point (miss tracer end)
+    _aimZ: null,
     _bound: null,
   };
 
@@ -189,6 +231,47 @@ export function createWeapons(player, hooks) {
     } else {
       result = { hit: false, reason: 'miss' };
     }
+    // r11-B4: bullet tracer — muzzle to the hit point, or to the
+    // crosshair ray target on a miss. Fists/bat never reach here
+    // (melee returns above), so no tracer without a gunshot. The
+    // existing muzzle flash still fires (h.flash above); the tracer
+    // is in addition, showing the bullet's path.
+    const muzzle = { x: mx, y: MUZZLE_Y, z: mz };
+    let end;
+    if (target) {
+      end = {
+        x: target.x,
+        y: typeof target.y === 'number' ? target.y : TARGET_Y,
+        z: target.z,
+      };
+    } else if (typeof sys._aimX === 'number' && typeof sys._aimZ === 'number') {
+      const adx = sys._aimX - player.x, adz = sys._aimZ - player.z;
+      const ad = Math.sqrt(adx * adx + adz * adz);
+      end = ad <= def.range
+        ? { x: sys._aimX, y: 0.05, z: sys._aimZ } // crosshair ground point
+        : {
+            x: muzzle.x + Math.cos(player.aim) * def.range,
+            y: MUZZLE_Y,
+            z: muzzle.z + Math.sin(player.aim) * def.range,
+          };
+    } else {
+      end = {
+        x: muzzle.x + Math.cos(player.aim) * def.range,
+        y: MUZZLE_Y,
+        z: muzzle.z + Math.sin(player.aim) * def.range,
+      };
+    }
+    const tracer = {
+      from: muzzle,
+      to: end,
+      segments: buildTracerSegments(muzzle, end),
+      born: sys.time,
+      life: TRACER_LIFE,
+      weapon: def.id,
+    };
+    sys.tracers.push(tracer);
+    result.tracer = tracer;
+    if (typeof h.tracer === 'function') h.tracer(tracer);
     // Every shot is heard: the police system escalates from here.
     if (typeof h.onShot === 'function') h.onShot(result);
     return result;
@@ -252,6 +335,14 @@ export function createWeapons(player, hooks) {
     if (typeof inp.aimX === 'number' && typeof inp.aimZ === 'number') {
       player.aim = Math.atan2(inp.aimZ - player.z, inp.aimX - player.x);
       if (player.aiming) player.angle = player.aim;
+    }
+    // r11-B4: remember the crosshair ground point — a miss's tracer
+    // ends there — and age out dead tracers (they fade in TRACER_LIFE).
+    if (typeof inp.aimX === 'number' && typeof inp.aimZ === 'number') {
+      sys._aimX = inp.aimX; sys._aimZ = inp.aimZ;
+    }
+    if (sys.tracers.length) {
+      sys.tracers = sys.tracers.filter((t) => sys.time - t.born < t.life);
     }
     sys.firing = !!inp.firing;
     const def = weaponDef(player.weapon);
@@ -344,6 +435,7 @@ export function createWeapons(player, hooks) {
       melee: def.mag === 0,
       aiming: sys.aiming,
       wheelOpen: sys.wheelOpen,
+      tracer: sys.tracers.length ? sys.tracers[sys.tracers.length - 1] : null, // r11-B4: latest live tracer
       slots: SLOT_ORDER.map((id, i) => {
         const d = weaponDef(id);
         const m = player.ammo[id] === undefined ? d.mag : player.ammo[id];
@@ -367,4 +459,60 @@ export function createWeapons(player, hooks) {
   sys.unbindInput = unbindInput;
   sys.snapshot = snapshot;
   return sys;
+}
+
+// Renderer for the r11-B4 tracer — the one piece the wiring layer
+// owns: pass THREE + the scene, get { show, update, dispose }.
+// show(tracer) draws its dash segments as a thin yellow
+// THREE.LineSegments (the segmentation lives in the geometry, so the
+// line is dashed by construction, never a solid beam); update(now)
+// fades each line out over its life and removes it. The weapons
+// system calls the `tracer` hook on every shot; the wiring layer
+// hands that hook to show() and ticks update(state.time) per frame
+// (born/life run on the same game clock as the muzzle flash).
+// No THREE is imported here — it is passed in, so this module stays
+// importable headless (Node self-test).
+export function createTracerRenderer(THREE, scene) {
+  const noop = { show() {}, update() {}, dispose() {} };
+  if (!THREE || !scene || typeof scene.add !== 'function') return noop;
+  const live = [];
+  function show(tracer) {
+    if (!tracer || !Array.isArray(tracer.segments) || !tracer.segments.length) return;
+    const pos = [];
+    for (const s of tracer.segments) {
+      pos.push(s.from.x, s.from.y, s.from.z, s.to.x, s.to.y, s.to.z);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const mat = new THREE.LineBasicMaterial({
+      color: 0xffe14d, transparent: true, opacity: 0.95,
+    });
+    const line = new THREE.LineSegments(geo, mat);
+    line.frustumCulled = false;
+    scene.add(line);
+    live.push({ line, geo, mat, born: tracer.born, life: tracer.life || TRACER_LIFE });
+  }
+  function update(now) {
+    for (let i = live.length - 1; i >= 0; i--) {
+      const t = live[i];
+      const age = now - t.born;
+      if (age >= t.life) {
+        scene.remove(t.line);
+        t.geo.dispose();
+        t.mat.dispose();
+        live.splice(i, 1);
+      } else {
+        t.mat.opacity = 0.95 * (1 - age / t.life);
+      }
+    }
+  }
+  function dispose() {
+    for (const t of live) {
+      scene.remove(t.line);
+      t.geo.dispose();
+      t.mat.dispose();
+    }
+    live.length = 0;
+  }
+  return { show, update, dispose };
 }

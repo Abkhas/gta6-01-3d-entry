@@ -71,6 +71,86 @@ const FOLLOW_GAP = 8.5;
 // and passing it (mid-block only, never a queue at a red).
 const FOLLOW_WAIT_S = 8;
 
+// ---- r11 B3: car collision rules ---------------------------------------
+// One set of numbers for the whole car-collision story, shared with
+// main3d (which imports CAR_HIT_SPEED) and the headless tests:
+//   CAR_YIELD_SPEED — a traffic car at or below this stops for a
+//     player on foot (it brakes to the bumper gap and waits);
+//   CAR_HIT_SPEED — a car at or above this that reaches the player
+//     hits them (knockback + damage in main3d's applyStreetDamage);
+//     between the two, a car yields in traffic logic, so an overlap
+//     only happens if the player walks into it — still a real hit.
+//   PED_HIT_SPEED — a car above this that reaches a ped runs them
+//     down (prone death + throw in hitPedsByCars below).
+const CAR_YIELD_SPEED = 6;
+const CAR_HIT_SPEED = 4;
+const PED_HIT_SPEED = 2;
+
+// Car-hit damage curve (Khase 19:43 WIB): damage scales with impact
+// speed — a slow bump is a bruise, a moderate-speed front/back hit
+// deals damage proportional to the impact. 0 below CAR_HIT_SPEED; 4
+// at the threshold, +2 per m/s above it, capped at 60. main3d's
+// applyStreetDamage calls this; the headless tests assert the table.
+export function carHitDamage(speed) {
+  const s = Math.abs(speed || 0);
+  if (s < CAR_HIT_SPEED) return 0;
+  return Math.min(60, 4 + 2 * (s - CAR_HIT_SPEED));
+}
+
+// Knockback scales the same way: a harder hit throws the player
+// further — 2.6 m at the threshold, 3.8 m at 12 m/s, 6.5 m at 30.
+export function carHitKnockback(speed) {
+  return 2 + Math.abs(speed || 0) * 0.15;
+}
+
+// Car footprints for the oriented-box tests (vehicles3d: a car is
+// 4.6 m long, 2.0 m wide; a moped 2.2 x 0.9 m).
+const CAR_HALF_LEN = 2.3;
+const CAR_HALF_WID = 1.0;
+const MOPED_HALF_LEN = 1.1;
+const MOPED_HALF_WID = 0.45;
+
+// Oriented-box overlap between two cars (SAT on the four edge axes).
+// Returns { nx, nz, depth } — the minimum-push axis from a to b —
+// or null when the boxes do not overlap. Pure: no sys, no world, so
+// the headless tests call it directly.
+export function carsOverlap(a, b) {
+  const ah = a.moped ? MOPED_HALF_LEN : CAR_HALF_LEN;
+  const aw = a.moped ? MOPED_HALF_WID : CAR_HALF_WID;
+  const bh = b.moped ? MOPED_HALF_LEN : CAR_HALF_LEN;
+  const bw = b.moped ? MOPED_HALF_WID : CAR_HALF_WID;
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  // Half-diagonals sum to ~5.0 m: further apart than that cannot touch.
+  if (dx * dx + dz * dz > 26) return null;
+  const aA = a.angle || 0;
+  const bA = b.angle || 0;
+  const axes = [
+    [Math.cos(aA), Math.sin(aA)],
+    [-Math.sin(aA), Math.cos(aA)],
+    [Math.cos(bA), Math.sin(bA)],
+    [-Math.sin(bA), Math.cos(bA)]
+  ];
+  let best = null;
+  for (let i = 0; i < axes.length; i++) {
+    const ux = axes[i][0];
+    const uz = axes[i][1];
+    const c = Math.abs(dx * ux + dz * uz);
+    const r = ah * Math.abs(Math.cos(aA) * ux + Math.sin(aA) * uz)
+      + aw * Math.abs(-Math.sin(aA) * ux + Math.cos(aA) * uz)
+      + bh * Math.abs(Math.cos(bA) * ux + Math.sin(bA) * uz)
+      + bw * Math.abs(-Math.sin(bA) * ux + Math.cos(bA) * uz);
+    if (c >= r) return null;
+    const depth = r - c;
+    if (!best || depth < best.depth) {
+      let nx = ux, nz = uz;
+      if (dx * ux + dz * uz < 0) { nx = -ux; nz = -uz; }
+      best = { nx: nx, nz: nz, depth: depth };
+    }
+  }
+  return best;
+}
+
 // ---- downed peds ----------------------------------------------------------
 // A ped shot down lies where it fell and fades after ~25 s — a body in
 // the road is gone within half a minute, never for the whole session.
@@ -377,6 +457,15 @@ export function createTraffic(world, vehicles) {
     };
     if (body) {
       body.traffic = true; body.moped = car.moped;
+    }
+    // r11 B3 — a moving car carries a visible driver (vehicles3d
+    // builds the figure; the body hook hides it for parked cars and
+    // mopeds, which have none). The driver flag is what main3d's
+    // carjack reads: a stopped car with driver 'npc' can be jacked.
+    const wantDriver = !o.parkedRow && !o.moped;
+    car.driver = wantDriver ? 'npc' : null;
+    if (body && body.userData && typeof body.userData.setDriverVisible === 'function') {
+      body.userData.setDriverVisible(wantDriver);
     }
     return car;
   }
@@ -955,6 +1044,19 @@ export function createTraffic(world, vehicles) {
         if (pdot > 0.82 && pperp <= 4) return { kind: 'player', dist: pd, speed: 0 };
       }
     }
+    // On foot the player is a person in the lane, not a car: the
+    // same corridor test, a different kind — updateMover yields to
+    // them when slow and lets a fast car through (r11 B3).
+    if (!pv && typeof player.x === 'number' && typeof player.z === 'number') {
+      const qdx = player.x - car.x;
+      const qdz = player.z - car.z;
+      const qd = Math.sqrt(qdx * qdx + qdz * qdz);
+      if (qd < 35 && qd > 2) {
+        const qdot = (qdx * Math.cos(car.angle) + qdz * Math.sin(car.angle)) / qd;
+        const qperp = Math.abs(-qdx * Math.sin(car.angle) + qdz * Math.cos(car.angle));
+        if (qdot > 0.82 && qperp <= 4) return { kind: 'playerFoot', dist: qd, speed: sys._playerSpeed || 0 };
+      }
+    }
     return null;
   }
 
@@ -985,6 +1087,112 @@ export function createTraffic(world, vehicles) {
     if (Math.abs(car.x - line) > half) return { x: aheadX, z: aheadZ };
     const dir = Math.sin(car.angle) >= 0 ? 1 : -1;
     return { x: line - dir * off, z: aheadZ };
+  }
+
+  // ---- r11 B3: car-car collision + ped hit by car -------------------
+  //
+  // Car-car: run once per frame after the movers move (see update()).
+  // Every pair close enough to touch is tested as oriented boxes
+  // (carsOverlap, module level) and pushed apart along the
+  // minimum-penetration axis, so two cars can never merge into one
+  // object: parked cars are immovable (only the other car moves), a
+  // moving pair splits the push. A closing impact above 2 m/s costs
+  // both cars damage — the player's car included, its condition
+  // following damage the same way a wall scrape does in main3d —
+  // and sheds speed on both sides, so neither drives through. Damage
+  // lands at most once per pair per half second, so a lingering
+  // touch does not grind a car down frame by frame.
+  function resolveCarCollisions(player, dt) {
+    const list = sys.cars.slice();
+    const pv = player && player.vehicle;
+    if (pv && pv.kind !== 'heli' && typeof pv.x === 'number' && typeof pv.z === 'number') list.push(pv);
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      for (let j = i + 1; j < list.length; j++) {
+        const b = list[j];
+        const hit = carsOverlap(a, b);
+        if (!hit) continue;
+        const aFixed = !!a.parkedRow;
+        const bFixed = !!b.parkedRow;
+        if (aFixed && bFixed) continue;
+        const pushA = aFixed ? 0 : (bFixed ? 1 : 0.5);
+        const pushB = bFixed ? 0 : (aFixed ? 1 : 0.5);
+        a.x -= hit.nx * hit.depth * pushA;
+        a.z -= hit.nz * hit.depth * pushA;
+        b.x += hit.nx * hit.depth * pushB;
+        b.z += hit.nz * hit.depth * pushB;
+        const avx = Math.cos(a.angle || 0) * (a.speed || 0);
+        const avz = Math.sin(a.angle || 0) * (a.speed || 0);
+        const bvx = Math.cos(b.angle || 0) * (b.speed || 0);
+        const bvz = Math.sin(b.angle || 0) * (b.speed || 0);
+        const closing = (avx - bvx) * hit.nx + (avz - bvz) * hit.nz;
+        if (closing > 2 && (a.collCd || 0) <= 0 && (b.collCd || 0) <= 0) {
+          const dmg = Math.min(20, closing * 1.5);
+          a.damage = Math.min(100, (a.damage || 0) + dmg);
+          b.damage = Math.min(100, (b.damage || 0) + dmg);
+          if (a === pv) a.condition = 100 - a.damage;
+          if (b === pv) b.condition = 100 - b.damage;
+          a.collCd = 0.5;
+          b.collCd = 0.5;
+          a.speed = (a.speed || 0) * 0.6;
+          b.speed = (b.speed || 0) * 0.6;
+        }
+        syncBody(a);
+        syncBody(b);
+      }
+    }
+    for (let k = 0; k < list.length; k++) {
+      if (list[k].collCd) list[k].collCd = Math.max(0, list[k].collCd - dt);
+    }
+  }
+
+  // Ped hit by a car: a moving car that reaches a pedestrian runs
+  // them down. The ped dies lying prone (health 0 — the update loop
+  // below puts them in the 'down' pose, which renders flat on their
+  // back, and fades the body after ~25 s) and is thrown clear of the
+  // car's path, sliding to a stop (the slide runs in the downed
+  // branch of update(), since a downed ped never reaches updatePed).
+  // The player's own car counts as a hitter; parked cars and
+  // crawling cars (under PED_HIT_SPEED) do not. A downed ped is
+  // never hit twice (health 0 skips them).
+  function hitPedsByCars(player) {
+    const hitters = [];
+    for (const c of sys.cars) {
+      if (c.traffic && !c.parkedRow && Math.abs(c.speed || 0) > PED_HIT_SPEED) hitters.push(c);
+    }
+    const pv = player && player.vehicle;
+    if (pv && pv.kind !== 'heli' && Math.abs(pv.speed || 0) > PED_HIT_SPEED) hitters.push(pv);
+    if (!hitters.length) return;
+    for (const ped of sys.peds) {
+      if (!ped || ped.health <= 0 || ped.down) continue;
+      for (const car of hitters) {
+        const hl = car.moped ? MOPED_HALF_LEN : CAR_HALF_LEN;
+        const hw = car.moped ? MOPED_HALF_WID : CAR_HALF_WID;
+        const dx = ped.x - car.x;
+        const dz = ped.z - car.z;
+        const ca = Math.cos(car.angle || 0);
+        const sa = Math.sin(car.angle || 0);
+        const along = dx * ca + dz * sa;
+        const perp = -dx * sa + dz * ca;
+        if (Math.abs(along) > hl + 0.3 || Math.abs(perp) > hw + 0.3) continue;
+        ped.health = 0;
+        ped.down = true;
+        ped.mode = 'down';
+        ped.downT = DOWN_FADE_S;
+        ped.speed = 0;
+        // Thrown clear: away from the car, with the car's own
+        // direction of travel — a 12 m/s hit throws the body ~3 m.
+        const dd = Math.hypot(dx, dz) || 1;
+        const tv = Math.min(10, 2 + Math.abs(car.speed || 0) * 0.45);
+        const tx = (dx / dd) * tv * 0.6 + ca * tv * 0.6;
+        const tz = (dz / dd) * tv * 0.6 + sa * tv * 0.6;
+        ped.thrown = { x: tx, z: tz };
+        ped.angle = Math.atan2(tz, tx);
+        // The car barely notices a body — a small speed cut only.
+        if (car !== pv) car.speed = (car.speed || 0) * 0.85;
+        break;
+      }
+    }
   }
 
   function updateMover(player, car, dt) {
@@ -1061,6 +1269,24 @@ export function createTraffic(world, vehicles) {
           car.goAroundT = 2.6;
           car.goAroundSide = 1;
           car.passTarget = player.vehicle;
+        }
+      } else if (ahead.kind === 'playerFoot') {
+        // r11 B3 — a person on foot in the lane. A SLOW car yields:
+        // it brakes to a stop at the bumper gap, exactly like it
+        // would behind a stopped car, and waits there — no going
+        // around a person, the car holds until they move. A FAST
+        // car does not brake for them at all: it keeps coming, and
+        // main3d's applyStreetDamage lands the hit (knockback +
+        // damage) when it reaches them. The split is the car's
+        // CURRENT speed, not its cruise: a car already crawling
+        // stops, a car already rolling at speed cannot.
+        if (car.speed <= CAR_YIELD_SPEED) {
+          want = Math.min(want, Math.max(0, (ahead.dist - FOLLOW_GAP) * 0.55));
+          if (ahead.dist < FOLLOW_GAP) want = 0;
+          car.playerBlock = (car.playerBlock || 0) + dt;
+          if (car.playerBlock > 1.5) car.honk = true;
+        } else {
+          car.playerBlock = 0;
         }
       } else if (ahead.dist < FOLLOW_GAP) {
         want = 0;
@@ -1513,6 +1739,11 @@ export function createTraffic(world, vehicles) {
     for (const car of sys.cars) {
       if (car.traffic && !car.parkedRow) updateMover(player, car, dt);
     }
+    // r11 B3: car-car shunts, then cars running peds down — both
+    // after the movers moved, before the peds step, so a hit ped is
+    // already down when the ped loop runs.
+    resolveCarCollisions(player, dt);
+    hitPedsByCars(player);
     for (let i = sys.peds.length - 1; i >= 0; i--) {
       const ped = sys.peds[i];
       if (ped.health <= 0) {
@@ -1521,6 +1752,19 @@ export function createTraffic(world, vehicles) {
         // walks again and never blocks a lane for a whole session.
         if (ped.mode !== 'down') {
           ped.mode = 'down'; ped.down = true; ped.speed = 0; ped.downT = DOWN_FADE_S;
+        }
+        // r11 B3: a ped thrown by a car slides to a stop where they
+        // fell — the slide runs here, not in updatePed, because a
+        // downed ped never reaches updatePed.
+        if (ped.thrown) {
+          const nx = ped.x + ped.thrown.x * dt;
+          const nz = ped.z + ped.thrown.z * dt;
+          if (!w.isSolid(nx, ped.z)) ped.x = nx;
+          if (!w.isSolid(ped.x, nz)) ped.z = nz;
+          const decay = Math.exp(-dt * 2.5);
+          ped.thrown.x *= decay;
+          ped.thrown.z *= decay;
+          if (Math.hypot(ped.thrown.x, ped.thrown.z) < 0.3) ped.thrown = null;
         }
         ped.downT -= dt;
         if (ped.downT <= 0) sys.peds.splice(i, 1);
@@ -1607,10 +1851,18 @@ export function createTraffic(world, vehicles) {
   sys.spawnPedGroup = spawnPedGroup;
   sys.lightIsRed = lightIsRed;
   sys.reportGunfire = reportGunfire;
+  // r11 B3 — diagnostic seams for the headless collision tests
+  // (dev/r11-b3-collision-test.mjs): the mover step, the car-ahead
+  // test, the shunt pass and the ped-hit pass, callable on
+  // controlled records without running the whole street.
+  sys.carAhead = carAhead;
+  sys.stepMover = updateMover;
+  sys.resolveCarCollisions = resolveCarCollisions;
+  sys.runPedHits = hitPedsByCars;
   sys.counts = counts;
   sys.bubble = bubble;
   sys.hud = hud;
   return sys;
 }
 
-export { MOVERS_WANTED, MOPEDS_WANTED, BEACH_PEDS, MARKET_PEDS, SIDEWALK_PEDS };
+export { MOVERS_WANTED, MOPEDS_WANTED, BEACH_PEDS, MARKET_PEDS, SIDEWALK_PEDS, CAR_YIELD_SPEED, CAR_HIT_SPEED, PED_HIT_SPEED };

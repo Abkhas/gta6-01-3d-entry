@@ -42,7 +42,7 @@ import { createPoliceSystem } from './police3d.js';
 import * as Crew3d from './crew3d.js';
 import * as Weapons3d from './weapons3d.js';
 import * as Progress3d from './progress3d.js';
-import { createTraffic } from './traffic3d.js';
+import { createTraffic, CAR_HIT_SPEED, carHitDamage, carHitKnockback } from './traffic3d.js';
 import { createDayNight } from './daynight3d.js';
 import * as Garage3d from './garage3d.js';
 import { createRadio, RADIO } from './radio3d.js';
@@ -326,6 +326,9 @@ const daynight = createDayNight(
 );
 daynight.setTime(CFG3D.DAY_START_HOUR);
 
+// r11-B4: bullet tracer renderer (thin yellow segmented line per shot).
+const tracerFx = Weapons3d.createTracerRenderer(THREE, scene);
+
 const weapons = Weapons3d.createWeapons(state.player, {
   getTargets: function () {
     const targets = [];
@@ -351,6 +354,7 @@ const weapons = Weapons3d.createWeapons(state.player, {
   onCrime: function (kind) { police.reportCrime(kind, state.player); },
   onEmpty: function () { setHudLine('CLICK — MAGAZINE EMPTY, PRESS R TO RELOAD'); },
   flash: function (mx, mz) { flashMuzzleAt(mx, mz); },
+  tracer: function (tr) { tracerFx.show(tr); }, // r11-B4: bullet tracer
   shake: function () { /* camera shake is the chase camera's lag; no-op */ }
 });
 
@@ -855,8 +859,9 @@ function updateMouseWorld(e) {
   // kill a genuine hold the moment the mouse moves again.
   if (typeof e.buttons === 'number') rmbHeld = (e.buttons & 2) !== 0;
 }
-canvas.addEventListener('mousemove', updateMouseWorld);
+canvas.addEventListener('mousemove', function (e) { police.noteInput(); updateMouseWorld(e); }); // r11-B2: mouse move resets the BUSTED idle clock
 canvas.addEventListener('mousedown', function (e) {
+  police.noteInput(); // r11-B2: any click resets the BUSTED idle clock
   if (e.button === 0) mouseHeld = true;
   if (e.button === 2) rmbHeld = true;
 });
@@ -877,6 +882,11 @@ function nearTarget(r) {
   return S.missionTarget && dist2D(S.player, S.missionTarget) < r;
 }
 function boardCar(car) {
+  // r11-B3: boarding a car with an NPC driver pulls them out — the
+  // figure hides (the carjack scene spawns the ped instead; a
+  // moving car just loses its driver, who is gone when it is left).
+  if (car.driver === 'npc') car.hadDriver = true;
+  if (car.body && car.body.userData && typeof car.body.userData.setDriverVisible === 'function') car.body.userData.setDriverVisible(false);
   S.player.vehicle = car;
   car.traffic = false;
   car.driver = 'player';
@@ -892,6 +902,18 @@ function boardGull() {
   S.player.y = 0; S.player.vy = 0;
   snapCamera();
 }
+// r11-B3: a car the player took from an NPC driver gets its driver
+// back when it is left behind (exit, WASTED, BUSTED), so it rejoins
+// traffic as a normal driven car instead of driving around empty.
+function restoreCarDriver(v) {
+  if (v && v.hadDriver) {
+    v.driver = 'npc';
+    v.hadDriver = false;
+    if (v.body && v.body.userData && typeof v.body.userData.setDriverVisible === 'function') v.body.userData.setDriverVisible(true);
+  } else if (v) {
+    v.driver = null;
+  }
+}
 function exitVehicle() {
   const v = S.player.vehicle;
   if (!v) return;
@@ -900,7 +922,7 @@ function exitVehicle() {
     v.occupied = false;
   } else {
     v.traffic = !v.hero;
-    v.driver = null;
+    restoreCarDriver(v); // r11-B3
     v.speed = 0;
   }
   const rx = Math.cos(S.player.angle + Math.PI / 2);
@@ -913,6 +935,7 @@ function exitVehicle() {
 }
 function doContextAction() {
   const p = S.player;
+  if (carjack) return; // r11-B3: E mid-scene does not restart it
   if (p.vehicle) { exitVehicle(); return; }
   const stage = Missions3d.currentStage(S);
   if (stage && stage.type === 'deliver' && nearTarget(12)) {
@@ -933,7 +956,96 @@ function doContextAction() {
     const d = dist2D(p, car);
     if (d < bestD) { bestD = d; best = car; }
   }
-  if (best) boardCar(best);
+  if (best) {
+    // r11-B3: E next to a STOPPED traffic car with a driver runs the
+    // carjack scene (aim -> driver exits -> player enters). Anything
+    // else — hero, parked, moving, driverless — boards the old way.
+    if (!best.hero && best.traffic && best.driver === 'npc' && !best.moped && !best.parkedRow && Math.abs(best.speed || 0) < 0.5) startCarjack(best);
+    else boardCar(best);
+  }
+}
+
+// ---------------------------------------------------------------------
+// Carjacking (r11-B3). E next to a stopped traffic car with a driver
+// runs a short scripted scene instead of the instant board:
+//   aim (0.6 s) — Rey aims at the driver (the tick holds the aim
+//     pose while the phase runs)
+//   exit (0.6 s) — the driver figure hides, a ped steps out on the
+//     driver's side and flees, Rey stops aiming
+//   enter — Rey boards the car (boardCar); the car is flagged jacked
+//     so leaving it later gives it a driver back (restoreCarDriver).
+// The scene is a timer on the tick, so it survives frame-rate
+// variation; Rey cannot move while it runs (the tick skips movement
+// during a carjack), and it cancels if the car drives off, if Rey is
+// pulled away from it, or if Rey dies / is busted mid-scene.
+// ---------------------------------------------------------------------
+let carjack = null; // { car, t, phase, startX, startZ } while jacking
+function startCarjack(car) {
+  const p = S.player;
+  carjack = { car: car, t: 0, phase: 'aim', startX: car.x, startZ: car.z };
+  p.aim = Math.atan2(car.z - p.z, car.x - p.x);
+  p.angle = p.aim;
+  setHudMsg('CARJACK — AIMING AT THE DRIVER');
+}
+function cancelCarjack() {
+  if (!carjack) return;
+  carjack = null;
+  weapons.setAiming(false);
+}
+function spawnJackedDriverPed(car) {
+  // The driver steps out on the driver's side (local -z, left-hand
+  // drive, just outside the door) and flees along the sidewalk like
+  // any startled ped. The record mirrors traffic3d's makePedRecord
+  // fields so the ped loop handles it as a normal walker afterwards.
+  const a = car.angle || 0;
+  const ca = Math.cos(a), sa = Math.sin(a);
+  const lx = -0.15, lz = -1.6;
+  const x = car.x + lx * ca - lz * sa;
+  const z = car.z + lx * sa + lz * ca;
+  const skins = ['#e8b48f', '#c98d64', '#8a5a3b'];
+  const shirts = ['#3d7ea6', '#c94f3d', '#e8c53a', '#4a6b4f'];
+  const ped = {
+    x: x, z: z,
+    angle: Math.atan2(z - car.z, x - car.x),
+    speed: 0, base: 1.2 + Math.random() * 1.2,
+    color: skins[Math.floor(Math.random() * skins.length)],
+    shirt: shirts[Math.floor(Math.random() * shirts.length)],
+    health: 100,
+    mode: 'flee', home: 'walk',
+    fleeT: 4, duckT: 0, chatT: 0, browseT: 0,
+    downT: 0, down: false, fleeSw: null,
+    anchor: null, beach: false, fighter: false,
+    promX: null, aisle: null, front: null,
+    sw: null, wp: null, waiting: null, noStraightJ: null
+  };
+  (S.peds || []).push(ped);
+}
+function updateCarjack(dt) {
+  if (!carjack) return;
+  const p = S.player;
+  const car = carjack.car;
+  carjack.t += dt;
+  // Cancel if the scene broke: the car drove off, Rey was pulled
+  // away (death/busted respawn), or Rey died mid-scene.
+  if (death || bustedState || Math.hypot(p.x - car.x, p.z - car.z) > 10 ||
+      Math.hypot(car.x - carjack.startX, car.z - carjack.startZ) > 8) {
+    cancelCarjack();
+    return;
+  }
+  if (carjack.phase === 'aim' && carjack.t >= 0.6) {
+    carjack.phase = 'exit';
+    if (car.body && car.body.userData && typeof car.body.userData.setDriverVisible === 'function') car.body.userData.setDriverVisible(false);
+    car.driver = null;
+    car.hadDriver = true;
+    spawnJackedDriverPed(car);
+    weapons.setAiming(false);
+    setHudMsg('DRIVER OUT — GETTING IN');
+  } else if (carjack.phase === 'exit' && carjack.t >= 1.2) {
+    const target = carjack.car;
+    carjack = null;
+    boardCar(target);
+    target.jacked = true;
+  }
 }
 function useCrewAbility(id) {
   const res = Crew3d.useAbility(S, id, Date.now(), function () {
@@ -955,6 +1067,13 @@ function startGameFromTitle(loadSave) {
   // NEW GAME passes loadSave === false: the selected slot is ignored
   // and the game starts fresh. Anything else loads the slot.
   const loaded = loadSave === false ? false : loadTitleSlot();
+  // r11-B1: the title pins the clock to golden hour (17.5); a fresh
+  // game restarts at the normal 09:30 open. A loaded save sets its
+  // own clock inside applyLoadedSave, so it is left alone.
+  if (titlePinned) {
+    titlePinned = false;
+    if (!loaded) { daynight.setTime(CFG3D.DAY_START_HOUR); clockHours = CFG3D.DAY_START_HOUR; }
+  }
   if (!loaded && !S.missions.current && (!S.missions.completed || S.missions.completed.length === 0)) {
     Missions3d.startMission(S, 'the-debt', missionHooks);
   }
@@ -1001,10 +1120,14 @@ function titleMenuSelection() {
 function dispatchTitleMenu() {
   if (window.PalmaScreens3d && window.PalmaScreens3d.systemsVisible &&
       window.PalmaScreens3d.systemsVisible()) return;
+  // r11-B1: while the dedicated settings panel is open, Enter must
+  // not start the game behind it.
+  if (window.PalmaScreens3d && window.PalmaScreens3d.settingsVisible &&
+      window.PalmaScreens3d.settingsVisible()) return;
   const sel = titleMenuSelection();
-  if (sel === 2) { // SETTINGS: systems screen on its settings tab
-    if (window.PalmaScreens3d) {
-      window.PalmaScreens3d.showSystems(S, city, { tab: 'settings', slots: Progress3d.listSaveSlots() });
+  if (sel === 2) { // r11-B1 SETTINGS: dedicated settings panel, never the systems screen
+    if (window.PalmaScreens3d && window.PalmaScreens3d.showSettings) {
+      window.PalmaScreens3d.showSettings(S, { slots: Progress3d.listSaveSlots() });
     }
     return;
   }
@@ -1014,6 +1137,7 @@ function dispatchTitleMenu() {
 }
 
 window.addEventListener('keydown', function (e) {
+  police.noteInput(); // r11-B2: any key resets the BUSTED idle clock
   if (e.code === 'Tab') return; // weapons.bindInput owns Tab
   keys.add(e.code);
   if (e.code === 'Enter') {
@@ -1021,6 +1145,10 @@ window.addEventListener('keydown', function (e) {
     if (S.banner) hideBanner();
   }
   if (S.screen === 'title') {
+    // r11-B1: arrows must not rebuild the title (resetting the menu
+    // selection) while the settings panel sits over it.
+    if (window.PalmaScreens3d && window.PalmaScreens3d.settingsVisible &&
+        window.PalmaScreens3d.settingsVisible()) return;
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
       S.titleSlot = (S.titleSlot + (e.code === 'ArrowRight' ? 1 : 2)) % 3;
       showTitleScreen();
@@ -1028,6 +1156,11 @@ window.addEventListener('keydown', function (e) {
     return;
   }
   if (e.code === 'Escape') {
+    // r11-B1: while the settings panel is open (from pause), Esc
+    // closes the panel only — it must NOT resume the game behind it.
+    // The panel's own Esc listener does the closing.
+    if (window.PalmaScreens3d && window.PalmaScreens3d.settingsVisible &&
+        window.PalmaScreens3d.settingsVisible()) return;
     if (S.screen === 'playing') {
       S.screen = 'paused';
       if (window.PalmaScreens3d) window.PalmaScreens3d.showSystems(S, city, { slots: Progress3d.listSaveSlots() });
@@ -1180,6 +1313,8 @@ function syncWorldMeshes(dt) {
     flashMesh.visible = false;
     flashMat.opacity = 0;
   }
+  // Bullet tracer fades (r11-B4).
+  tracerFx.update(S.time);
 }
 
 // ---------------------------------------------------------------------
@@ -1246,11 +1381,14 @@ function carBlocksAt(car, x, z) {
   const perp = -dx * sa + dz * ca;
   return Math.abs(along) < hl + PLAYER_RADIUS && Math.abs(perp) < hw + PLAYER_RADIUS;
 }
-function footBlockedAt(x, z) {
+function footBlockedAt(x, z, skipCars) { // r11-B4: skipCars lets an airborne player pass over a car roof
   // Buildings, with the player radius.
   if (world.isSolid(x, z) || world.isSolid(x + PLAYER_RADIUS, z) || world.isSolid(x - PLAYER_RADIUS, z) ||
       world.isSolid(x, z + PLAYER_RADIUS) || world.isSolid(x, z - PLAYER_RADIUS)) return true;
   // Cars: traffic (parked + moving), the hero car, police cars.
+  // r11-B4: skipped while airborne above roof height — a jump can
+  // carry the player over a car instead of bumping into its side.
+  if (!skipCars) {
   const cars = (traffic && traffic.cars) || S.cars || [];
   for (const car of cars) if (carBlocksAt(car, x, z)) return true;
   if (carBlocksAt(heroCar, x, z)) return true;
@@ -1259,6 +1397,7 @@ function footBlockedAt(x, z) {
       if (u.ped) continue;
       if (carBlocksAt(u.car || u, x, z)) return true;
     }
+  }
   }
   // The landed Gull.
   if (gull && gull.landed && (gull.altitude || 0) <= 0.5) {
@@ -1275,18 +1414,46 @@ function footBlockedAt(x, z) {
   }
   return false;
 }
-// Jump (r10): Space on foot only — never in a car, where Space is
-// the handbrake. A small hop: vy starts it, gravity pulls it back,
-// and the player lands flat on y=0, never through the ground.
-// Horizontal collision is unchanged while airborne (footBlockedAt
-// is 2D), so a jump cannot carry the player through a building or a
-// car — it just bumps them against it. ~0.75 m high, ~0.66 s air.
-const JUMP_V = 4.6; // m/s up
+// Jump (r11-B4): Space on foot only — never in a car, where Space is
+// the handbrake. vy starts it, gravity pulls it back. Tall enough to
+// clear a car roof (apex ~1.75 m vs a ~1.45 m roof) so the player can
+// land on it: while above roof height cars stop blocking horizontal
+// movement (footBlockedAt skipCars), and a descent over a car body
+// lands on the roof instead of falling through it. Buildings still
+// block at any height — a jump cannot carry the player through one.
+// ~1.75 m high, ~1.0 s air.
+const JUMP_V = 7.0; // m/s up
 const JUMP_G = 14;  // m/s^2 down
-function tryJump() {
+const CAR_ROOF_Y = 1.45; // m — roof panel top (vehicles3d: ~1.36–1.41)
+// r11-B4: strict oriented-box test — inside the car body itself, no
+// player-radius padding, so standing on "air" beside a car is not a roof.
+function carBodyAt(car, x, z) {
+  if (!car || car.moped || typeof car.x !== 'number' || typeof car.z !== 'number') return false;
+  const dx = x - car.x, dz = z - car.z;
+  const ca = Math.cos(car.angle || 0), sa = Math.sin(car.angle || 0);
+  const along = dx * ca + dz * sa;
+  const perp = -dx * sa + dz * ca;
+  return Math.abs(along) < CAR_HALF_LEN && Math.abs(perp) < CAR_HALF_WID;
+}
+// r11-B4: roof height under (x, z), or 0 when no car roof is there.
+// Mopeds have no standable roof; the Gull is excluded too.
+function carRoofAt(x, z) {
+  const cars = (traffic && traffic.cars) || S.cars || [];
+  for (const car of cars) if (carBodyAt(car, x, z)) return CAR_ROOF_Y;
+  if (carBodyAt(heroCar, x, z)) return CAR_ROOF_Y;
+  if (S.police) {
+    for (const u of S.police.units || []) {
+      if (u.ped) continue;
+      if (carBodyAt(u.car || u, x, z)) return CAR_ROOF_Y;
+    }
+  }
+  return 0;
+}
+function tryJump() { // r11-B4: also allowed from a car roof (standing on one is y > 0 with vy 0)
   const p = S.player;
   if (p.vehicle) return;
-  if ((p.y || 0) > 0 || (p.vy || 0) !== 0) return; // already airborne
+  if ((p.vy || 0) !== 0) return; // already airborne
+  if ((p.y || 0) > 0 && carRoofAt(p.x, p.z) !== (p.y || 0)) return; // mid-air, not standing on a roof
   p.vy = JUMP_V;
 }
 function stepOnFoot(dt) {
@@ -1312,20 +1479,30 @@ function stepOnFoot(dt) {
     // Axis-separated, so a blocked axis slides along the obstacle.
     // Already inside (a car drove into the player, or an exit spawn
     // landed on a footprint)? Let the step through — the way out.
-    const inside = footBlockedAt(p.x, p.z);
-    if (inside || !footBlockedAt(nx, p.z)) p.x = nx;
-    if (inside || !footBlockedAt(p.x, nz)) p.z = nz;
+    // r11-B4: above roof height, cars stop blocking — the jump can
+    // carry the player over a roof. Buildings still block (footBlockedAt
+    // always checks world.isSolid), so no clipping through walls.
+    const aboveRoof = (p.y || 0) > CAR_ROOF_Y;
+    const inside = footBlockedAt(p.x, p.z, aboveRoof);
+    if (inside || !footBlockedAt(nx, p.z, aboveRoof)) p.x = nx;
+    if (inside || !footBlockedAt(p.x, nz, aboveRoof)) p.z = nz;
     if (!p.aiming) p.angle = Math.atan2(mz, mx);
     p.x = Math.max(CFG3D.OCEAN_X + 40, Math.min(CFG3D.CITY_HALF, p.x));
     p.z = Math.max(-CFG3D.CITY_HALF, Math.min(CFG3D.CITY_HALF, p.z));
   }
   if (p.aiming) p.angle = p.aim;
-  // Jump arc (r10): runs even with no movement keys held. Gravity
-  // while airborne, land flat on y=0.
+  // Jump arc (r11-B4): runs even with no movement keys held. Gravity
+  // while airborne; descending over a car roof lands on the roof,
+  // otherwise land flat on y=0. Walking off a roof edge falls to 0
+  // (carRoofAt is 0 past the body, so no hovering on air).
   if ((p.y || 0) > 0 || (p.vy || 0) !== 0) {
     p.vy = (p.vy || 0) - JUMP_G * dt;
     p.y = (p.y || 0) + p.vy * dt;
-    if (p.y <= 0) { p.y = 0; p.vy = 0; }
+    if ((p.vy || 0) <= 0) {
+      const roof = carRoofAt(p.x, p.z);
+      if (roof > 0 && p.y <= roof) { p.y = roof; p.vy = 0; }
+      else if (p.y <= 0) { p.y = 0; p.vy = 0; }
+    }
   }
 }
 function stepCar(dt) {
@@ -1642,7 +1819,7 @@ function startDeath() {
   const v = p.vehicle;
   if (v) {
     if (v.kind === 'heli') v.occupied = false;
-    else { v.traffic = !v.hero; v.driver = null; v.speed = 0; }
+    else { v.traffic = !v.hero; restoreCarDriver(v); v.speed = 0; } // r11-B3: driver back
     p.vehicle = null;
   }
   weapons.setAiming(false);
@@ -1695,9 +1872,10 @@ function respawnFromDeath() {
 
 // ---------------------------------------------------------------------
 // BUSTED + police-HQ revive (r10, B6) — the arrest beat.
-//   trigger: police3d.js applyBusted — a foot officer holds Rey
-//     within 15 m for 1.2 s, OR Rey holds still surrounded by aiming
-//     officers for 6 s (BUSTED_STILL_S)
+//   trigger (r11 B2): police3d.js applyBusted — Rey gives NO input
+//     at all for 60 s while wanted (BUSTED_IDLE_S). Moving, aiming
+//     or shooting resets the clock; the surround/aim/shoot pressure
+//     stays, but it can no longer bust a player still fighting.
 //   card: BUSTED card (no greyscale), ~3 s hold
 //   fade: to black, then respawn on foot in front of the PVPD
 //     HEADQUARTERS (world.policeHQ, Northgate), full health, wanted
@@ -1722,7 +1900,7 @@ function startBusted(fine) {
   const v = p.vehicle;
   if (v) {
     if (v.kind === 'heli') v.occupied = false;
-    else { v.traffic = !v.hero; v.driver = null; v.speed = 0; }
+    else { v.traffic = !v.hero; restoreCarDriver(v); v.speed = 0; } // r11-B3: driver back
     p.vehicle = null;
   }
   weapons.setAiming(false);
@@ -1765,26 +1943,47 @@ function respawnFromBusted() {
 
 // Street damage (r8, B4): the two damage sources that can actually
 // put the player on the ground. (1) A moving traffic car that reaches
-// an on-foot player — 20 damage. Traffic normally brakes and steers
-// around the player (traffic3d carAhead), so this is the safety net
-// for stepping in front of a car already too close to stop; the live
-// source is (2) the police ram in police3d.js contactHits, -6 per
-// unit per second on foot, which is what grinds HP to 0 in a chase.
-// (3) A fighting ped's punch — 4 damage. One shared 1 s cooldown so
-// a pile-up cannot insta-kill. Parked cars (speed 0) never hit.
+// an on-foot player — damage SCALED with impact speed (r11-B3,
+// Khase 19:43 WIB): a slow bump is a bruise, a moderate-speed
+// front/back hit deals damage proportional to the impact, the harder
+// the hit the more damage — never one flat value. Traffic normally
+// brakes and steers around the player (traffic3d carAhead), so this
+// is the safety net for stepping in front of a car already too close
+// to stop; the live source is (2) the police ram in police3d.js
+// contactHits, -6 per unit per second on foot, which is what grinds
+// HP to 0 in a chase. (3) A fighting ped's punch — 4 damage. One
+// shared 1 s cooldown so a pile-up cannot insta-kill. Parked cars
+// (speed 0) never hit.
 function applyStreetDamage(dt) {
   const p = S.player;
   if (p.vehicle || death) return;
   streetDamageT = Math.max(0, streetDamageT - dt);
   if (streetDamageT > 0) return;
   for (const car of S.cars || []) {
-    if (!car || Math.abs(car.speed || 0) < 2) continue;
-    if (Math.hypot(car.x - p.x, car.z - p.z) < 3.2) {
-      weapons.takeDamage(20);
-      streetDamageT = 1;
-      setHudMsg('HIT BY A CAR');
-      return;
-    }
+    // r11-B3: only a REAL hit hurts, and only as hard as the impact.
+    // A slow car has already yielded (traffic3d stops it at the
+    // bumper gap), so merely standing in its path — or it creeping
+    // up to Rey — costs nothing; the hit needs the car's body
+    // actually reaching Rey (carBlocksAt), not just nearness, and a
+    // car under CAR_HIT_SPEED (4 m/s) never hurts at all.
+    const spd = car ? Math.abs(car.speed || 0) : 0;
+    if (!car || spd < CAR_HIT_SPEED) continue;
+    if (!carBlocksAt(car, p.x, p.z)) continue;
+    // Damage curve (Khase 19:43, traffic3d carHitDamage): 4 at the
+    // 4 m/s threshold, +2 per m/s above it, capped at 60 — a 12 m/s
+    // hit deals 20, a 20 m/s hit 36, a 30 m/s hit 56. WASTED follows
+    // from the health check in the tick (health <= 5), as before.
+    // Knockback scales the same way: a harder hit throws Rey further.
+    const dmg = carHitDamage(spd);
+    const push = carHitKnockback(spd);
+    const dx = p.x - car.x, dz = p.z - car.z;
+    const d = Math.hypot(dx, dz) || 1;
+    p.x += (dx / d) * push + Math.cos(car.angle || 0) * 1.2;
+    p.z += (dz / d) * push + Math.sin(car.angle || 0) * 1.2;
+    weapons.takeDamage(Math.round(dmg));
+    streetDamageT = 1;
+    setHudMsg('HIT BY A CAR');
+    return;
   }
   for (const ped of S.peds || []) {
     if (ped && ped.mode === 'fight' && Math.hypot(ped.x - p.x, ped.z - p.z) < 2.2) {
@@ -1802,8 +2001,12 @@ function applyStreetDamage(dt) {
 // ---------------------------------------------------------------------
 const clock = new THREE.Clock();
 let hudAcc = 0;
+let bustedWarnAt = 0; // r11-B2: last BUSTED-countdown warning (S.time)
 let booted = false;
 let frameNo = 0; // shadow map updates on even frames only (see above)
+// r11-B1: true while the title's golden-hour grade is pinned (set in
+// the title branch of tick, cleared in startGameFromTitle).
+let titlePinned = false;
 
 function tick() {
   requestAnimationFrame(tick);
@@ -1863,7 +2066,10 @@ function tick() {
     // below is what actually gates the shot. In a vehicle the
     // drive-by keeps its old behaviour: LMB fires from the car
     // with no RMB needed, and aiming stays off.
-    const wantAim = rmbHeld && !p.vehicle && !!mouseWorld;
+    // r11-B3: during the carjack aim phase Rey holds the aim pose
+    // (the scene, not the mouse, is aiming); otherwise aim only
+    // while the right mouse button is held, on foot.
+    const wantAim = !p.vehicle && (rmbHeld || !!(carjack && carjack.phase === 'aim')) && !!mouseWorld;
     weapons.setAiming(wantAim);
     weapons.update(dt, {
       aimX: mouseWorld ? mouseWorld.x : p.x + Math.cos(p.aim),
@@ -1872,8 +2078,10 @@ function tick() {
       pressed: false
     });
 
-    // Movement.
-    if (p.vehicle && p.vehicle.kind === 'heli') stepGull(dt);
+    // Movement. A carjack freezes Rey on the spot while the scene
+    // runs (r11-B3) — the timer, not input, advances it.
+    if (carjack) updateCarjack(dt);
+    else if (p.vehicle && p.vehicle.kind === 'heli') stepGull(dt);
     else if (p.vehicle) stepCar(dt);
     else stepOnFoot(dt);
 
@@ -1941,10 +2149,43 @@ function tick() {
     if (hudAcc > 1 / 15) {
       hudAcc = 0;
       if (hud) hud.update(S, city);
+      // r11-B2: idle-BUSTED countdown — a quiet warning in the
+      // last 10 s of the minute, only when no transient message
+      // is up, re-armed every 4 s (warns ~10 s, ~6 s, ~2 s).
+      if (!hudMsgUntil || S.time > hudMsgUntil) {
+        const bi = police.hud().bustedIn;
+        if (typeof bi === 'number' && bi <= 10 && S.time - bustedWarnAt > 4) {
+          bustedWarnAt = S.time;
+          setHudMsg('PVPD CLOSING IN — MOVE OR BE BUSTED IN ' + Math.ceil(bi) + 's', 3);
+        }
+      }
     }
   } else if (S.screen === 'paused') {
     // Frozen world behind the systems screen; keep the sky alive.
     updateSky(scene, dt);
+  } else if (S.screen === 'title') {
+    // r11-B1: LIVE TITLE — a slow golden-hour camera loop over the
+    // beach/boardwalk, grade pinned to 17.5 (afternoon) so the title
+    // never cycles into night mid-menu. 48 s ping-pong loop (24 s
+    // out, 24 s back, smoothstep eased), camera over the shoreline
+    // looking east into the city; clouds drift via updateSky and
+    // traffic keeps moving so the frame has street life. The clock
+    // restore on game start lives in startGameFromTitle.
+    if (!titlePinned) {
+      daynight.setTime(17.5);
+      clockHours = 17.5;
+      titlePinned = true;
+    }
+    updateSky(scene, dt);
+    traffic.update(dt, p, { time: S.time, nightF: daynight.stars });
+    S.cars = traffic.cars;
+    S.peds = traffic.peds;
+    const titleT = S.time % 48;
+    const titlePh = titleT < 24 ? titleT / 24 : (48 - titleT) / 24;
+    const titleE = titlePh * titlePh * (3 - 2 * titlePh);
+    camera.position.set(-1560 + titleE * 120, 46 + Math.sin(titleE * Math.PI) * 10, -320 + titleE * 420);
+    camera.lookAt(-700, 18, 40);
+    if (Math.abs(camera.fov - 42) > 0.01) { camera.fov = 42; camera.updateProjectionMatrix(); }
   }
 
   // Aim overlay: crosshair + targeted-ped health bar. Runs every

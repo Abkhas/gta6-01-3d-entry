@@ -23,7 +23,7 @@
 // 95 m). All the timings are carried over unchanged: dispatch first
 // unit 0.5 s, one more every 0.9 s, heli 4 s after the third star,
 // search after 2 s unseen, a star blinks out after 8 s unseen,
-// bust hold 1.2 s.
+// BUSTED after 60 s of zero input while wanted (r11 B2).
 //
 // World handle (B1's world3d, duck-typed — every method is optional
 // and a 200 m road-grid fallback from CFG3D stands in when it is
@@ -59,10 +59,25 @@ const MAX_FOOT = 8; // r10 B6: cap on foot officers on the street at once
 const HELI_STARS = 3;
 const HELI2_STARS = 6; // r10 B6: the second helicopter only at six stars
 const HELI_ORBIT = 95; // metres, heli orbit radius around the player
-// r10 B6 — the standoff: when Rey stops moving, cruisers park and their
-// crews get out, surround him at pistol range and shoot. Hold still
-// surrounded for BUSTED_STILL_S and it is BUSTED.
-const BUSTED_STILL_S = 6; // seconds still, surrounded, before BUSTED
+// r11 B2 — the standoff stays (cruisers park, crews get out,
+// surround at pistol range and shoot), but the arrest rule changed:
+// BUSTED fires ONLY after BUSTED_IDLE_S of zero input while wanted
+// — no WASD, no mouse move/click, no keys, no shooting. Moving or
+// shooting resets the clock, however long the standoff lasts.
+const BUSTED_IDLE_S = 60; // seconds of zero input, wanted, before BUSTED
+// r11 B2 — imperfect pursuit: a unit only has a live fix on Rey
+// after REACQUIRE_S of continuous line of sight; lose sight and it
+// falls back to searching its own last-seen point, and has to
+// re-acquire from scratch. One unit spotting Rey no longer
+// teleports the whole fleet onto him.
+const REACQUIRE_S = 1.2; // seconds of continuous LOS to (re-)acquire
+// r11 B2 — a threatened officer: seconds an officer stays engaged
+// (aiming back + shooting) after being aimed at or shot.
+const THREAT_HOLD_S = 5;
+// r11 B2 — car-car collision: circle radii for the push-apart
+// between police cars, and between a police car and Rey's car.
+const POLICE_CAR_RADIUS = 2.6; // metres, half the 4.6 m body + margin
+const PLAYER_CAR_RADIUS = 2.6;
 const SURROUND_RING = 10; // metres — the ring officers hold around Rey
 const OFFICER_FIRE_RANGE = 40; // metres — pistol range from an officer
 const OFFICER_FIRE_DMG = 2; // HP per officer pistol hit (armour absorbs 60%)
@@ -82,8 +97,8 @@ const ESCAPE_UNSEEN = 8;
 const ESCAPE_DIST = 180; // nearest unit must be further than this to escape
 const ESCALATE_SHOTS = 4;
 const ESCALATE_GAP = 5;
-const BUST_DIST = 15; // metres — the 2D design's 30u at ~2u per metre
-const BUST_HOLD = 1.2;
+// (r11 B2: BUST_DIST / BUST_HOLD removed — the 1.2 s close-range
+// arrest is gone; only a full minute of zero input busts Rey now.)
 const FOOT_SPEED = 5; // m/s, an officer runs at Rey's run speed
 const CRUISER_TOP = 40; // m/s
 const BIKE_TOP = 46; // m/s
@@ -350,6 +365,26 @@ function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
+// r11 B2 (Khase 19:43) — police shots are NOT perfect hitscan.
+// Module scope: it is exported, so it must NOT live inside
+// createPoliceSystem (a function-scope export breaks the whole
+// ES-module graph and the game never boots). A shot is a spread
+// cone, not a ray: the chance it lands is the target's angular
+// size against a spread that widens with range and with the
+// target's movement. Well below 100% everywhere — a moving player
+// who returns fire can survive a standoff — but a stationary
+// player at pistol range still gets hit often enough that the
+// pressure is real. Numbers: ~0.60 stationary at 10 m, ~0.22
+// stationary at 40 m, ~0.27 moving at 10 m, ~0.10 moving at 40 m,
+// ~0.09 from a heli at 95 m.
+function policeShotHitChance(distM, playerMoving) {
+  const d = Math.max(0, distM || 0);
+  const rangeF = clamp(1 - Math.max(0, d - 8) / 50, 0.15, 1);
+  let p = 0.62 * rangeF;
+  if (playerMoving) p *= 0.45;
+  return clamp(p, 0.05, 0.65);
+}
+
 function dist2(ax, az, bx, bz) {
   const dx = ax - bx;
   const dz = az - bz;
@@ -506,7 +541,8 @@ export function createPoliceSystem(world, vehicles) {
     heliAt: 0,
     heli2At: 0,
     busted: null,
-    bustedT: 0, // r10 B6: seconds Rey has held still while surrounded
+    bustedT: 0, // r11 B2: mirrors idleT — the BUSTED countdown value
+    idleT: 0, // r11 B2: seconds since Rey's last input, while wanted
     playerStill: false, // r10 B6: Rey (on foot or in a stopped car) is not moving
     playerSpeed: 0,
     movingT: 0, // r10 B6: continuous seconds of movement — a single
@@ -702,6 +738,11 @@ export function createPoliceSystem(world, vehicles) {
       bornT: now,
       searchPhase: idx * 1.7,
       parkedT: 0,
+      seenFor: 0, // r11 B2: continuous seconds of LOS on Rey
+      lostFor: 0, // r11 B2: continuous seconds without LOS
+      tracking: false, // r11 B2: this unit has a live fix on Rey
+      lastSeenSelf: null, // r11 B2: where THIS unit last saw Rey
+      threatT: 0, // r11 B2: seconds left of "aimed at / shot" engagement
     };
   }
 
@@ -733,6 +774,11 @@ export function createPoliceSystem(world, vehicles) {
       bornT: now,
       searchPhase: idx * 1.7,
       parkedT: 0,
+      seenFor: 0, // r11 B2: continuous seconds of LOS on Rey
+      lostFor: 0, // r11 B2: continuous seconds without LOS
+      tracking: false, // r11 B2: this unit has a live fix on Rey
+      lastSeenSelf: null, // r11 B2: where THIS unit last saw Rey
+      threatT: 0, // r11 B2: seconds left of "aimed at / shot" engagement
     };
     if (spec.kind === 'foot') {
       const foot = makeFootUnit(
@@ -890,6 +936,46 @@ export function createPoliceSystem(world, vehicles) {
     if (s.bluePool) s.bluePool.material.opacity = blueOn ? 0.5 : 0.02;
   }
 
+  // r11 B2 — is the player's aim ray sitting on this officer?
+  // Same corridor the aim overlay uses in main3d (findAimTarget):
+  // within 80 m, in a ~0.9 m half-width corridor around the aim
+  // heading, with line of sight. A rifle sight on an officer is a
+  // threat, not a pose.
+  const AIM_DETECT_RANGE = 80;
+  function playerAimingAt(unit, player) {
+    if (!player || player.vehicle || !player.aiming) return false;
+    if (typeof player.aim !== 'number') return false;
+    const dx = Math.cos(player.aim);
+    const dz = Math.sin(player.aim);
+    const rx = unit.x - player.x;
+    const rz = unit.z - player.z;
+    const along = rx * dx + rz * dz;
+    if (along < 0.5 || along > AIM_DETECT_RANGE) return false;
+    const perp = Math.abs(-rx * dz + rz * dx);
+    if (perp > 0.9 + along * 0.01) return false;
+    return hasLineOfSight(unit.x, unit.z, player, AIM_DETECT_RANGE);
+  }
+
+  // r11 B2 — one unit's eyes, one frame. A live fix needs
+  // REACQUIRE_S of continuous line of sight; lose sight for
+  // SEARCH_DELAY and the fix is gone — the unit searches its own
+  // last-seen point and must re-acquire from scratch. `searching`
+  // is per-unit now, not the fleet-wide flag.
+  function updateUnitSight(unit, player, dt) {
+    const sees = unitSees(unit, player);
+    if (sees) {
+      unit.seenFor = (unit.seenFor || 0) + dt;
+      unit.lostFor = 0;
+      unit.lastSeenSelf = { x: player.x, z: player.z };
+      if (unit.seenFor >= REACQUIRE_S) unit.tracking = true;
+    } else {
+      unit.seenFor = 0;
+      unit.lostFor = (unit.lostFor || 0) + dt;
+      if (unit.lostFor > SEARCH_DELAY) unit.tracking = false;
+    }
+    unit.searching = !unit.tracking;
+  }
+
   // One cruiser or bike, one frame of driving. Chasers aim at Rey,
   // flankers aim at a point off his shoulder, PIT units pull alongside
   // and steer into his rear quarter, and the roadblock car races ahead
@@ -916,7 +1002,8 @@ export function createPoliceSystem(world, vehicles) {
     // a chase instead.
     const crewOut = unit.deployed.some((d) => !d.leaving);
     if (sys.playerStill && !unit.leaving && (unit.crew > 0 || crewOut) &&
-        dist2(unit.x, unit.z, player.x, player.z) < 70) {
+        dist2(unit.x, unit.z, player.x, player.z) < 70 &&
+        (unit.tracking || unitSees(unit, player))) {
       unit.speed = Math.max(0, unit.speed - 30 * dt);
       if (unit.speed < 1) {
         unit.speed = 0;
@@ -931,11 +1018,19 @@ export function createPoliceSystem(world, vehicles) {
       const away = Math.atan2(unit.z - player.z, unit.x - player.x);
       tx = unit.x + Math.cos(away) * 150;
       ty = unit.z + Math.sin(away) * 150;
-    } else if (unit.searching && sys.lastSeen) {
-      const ls = sys.lastSeen;
-      const ph = sys.time * 0.35 + unit.searchPhase;
-      tx = ls.x + Math.cos(ph) * 75;
-      ty = ls.z + Math.sin(ph) * 75;
+    } else if (!unit.tracking) {
+      // r11 B2 — no live fix: search the last place THIS unit saw
+      // Rey (or the radioed last-seen point for a fresh unit) and
+      // wander around it. The unit does not know where Rey is now.
+      const ls = unit.lastSeenSelf || sys.lastSeen;
+      if (ls) {
+        const ph = sys.time * 0.35 + unit.searchPhase;
+        tx = ls.x + Math.cos(ph) * 75;
+        ty = ls.z + Math.sin(ph) * 75;
+      } else {
+        tx = player.x;
+        ty = player.z;
+      }
     } else if (unit.role === 'roadblock') {
       const head = headingOf(player);
       const snap = w.nearestRoadPoint(player.x + Math.cos(head) * 140, player.z + Math.sin(head) * 140);
@@ -981,12 +1076,16 @@ export function createPoliceSystem(world, vehicles) {
     ty = wp.z;
     const wantAngle = Math.atan2(ty - unit.z, tx - unit.x);
     const diff = angDiff(unit.angle, wantAngle);
-    const turnRate = 2.4; // rad/s — a cruiser turns, it does not snap
+    const top = unit.kind === 'bike' ? BIKE_TOP : CRUISER_TOP;
+    // r11 B2 — overshoot: a cruiser at speed cannot snap around a
+    // corner — its turn rate falls as speed rises, and it carries
+    // throttle through a hard turn, so it sweeps wide past a sharp
+    // turn instead of pivoting onto Rey's bumper.
+    const turnRate = 2.4 * (1 - 0.45 * Math.min(1, unit.speed / top));
     unit.angle += clamp(diff, -turnRate * dt, turnRate * dt);
     // A block dead ahead: work around it instead of pushing into it.
     steerAroundWalls(unit, tx, ty, dt);    // Steer toward the target angle, then roll forward.
-    const top = unit.kind === 'bike' ? BIKE_TOP : CRUISER_TOP;
-    let throttle = Math.abs(diff) > 1.4 ? 0.25 : 1;
+    let throttle = Math.abs(diff) > 1.4 ? 0.5 : 1;
     if (unit.tactic === 'RAMMING' || unit.tactic === 'PIT') throttle = 1;
     const dP = dist2(unit.x, unit.z, player.x, player.z);
     if (dP < 28 && !unit.leaving) throttle = 0.35;
@@ -1023,16 +1122,38 @@ export function createPoliceSystem(world, vehicles) {
   // their pistols and shoot. A moving Rey gets chased, not shot at.
   // Close on Rey while Rey is on foot and the arrest clock runs.
   function driveFoot(unit, player, dt) {
+    // r11 B2 — officers never flee: whatever set a flee flag on
+    // this ped (a gunshot reaction elsewhere), clear it. An officer
+    // stands his ground; fleeing is for civilian peds only.
+    if (unit.ped) {
+      unit.ped.fleeing = false;
+      if (unit.ped.mode === 'flee') unit.ped.mode = 'walk';
+      unit.ped.fleeT = 0;
+    }
+    // r11 B2 — aimed at? While the player's sights sit on this
+    // officer the threat clock refreshes: he aims back at once.
+    // Shot? reportGunfire sets the same clock. Either way the
+    // officer stands and fights — he does not run.
+    if (playerAimingAt(unit, player)) unit.threatT = THREAT_HOLD_S;
+    unit.threatT = Math.max(0, (unit.threatT || 0) - dt);
+    const engaged = unit.threatT > 0 && !unit.leaving;
     let tx;
     let ty;
     const dp = dist2(unit.x, unit.z, player.x, player.z);
     const surrounding = sys.playerStill && !unit.leaving && dp < 70;
+    let holdGround = false;
     if (unit.leaving) {
       const away = Math.atan2(unit.z - player.z, unit.x - player.x);
       tx = unit.x + Math.cos(away) * 100;
       ty = unit.z + Math.sin(away) * 100;
-    } else if (unit.searching && sys.lastSeen) {
-      const ls = sys.lastSeen;
+    } else if (engaged) {
+      // Stand and fight: close to pistol range, then plant feet
+      // and shoot. The target is Rey, never cover.
+      tx = player.x;
+      ty = player.z;
+      if (dp < 12) holdGround = true;
+    } else if (!unit.tracking && (unit.lastSeenSelf || sys.lastSeen)) {
+      const ls = unit.lastSeenSelf || sys.lastSeen;
       const ph = sys.time * 0.3 + unit.searchPhase;
       tx = ls.x + Math.cos(ph) * 55;
       ty = ls.z + Math.sin(ph) * 55;
@@ -1045,7 +1166,7 @@ export function createPoliceSystem(world, vehicles) {
     }
     const wp = navigateTarget(unit, tx, ty);
     const d = dist2(unit.x, unit.z, wp.x, wp.z);
-    if (d > 2) {
+    if (d > 2 && !holdGround) {
       const a = Math.atan2(wp.z - unit.z, wp.x - unit.x);
       unit.angle = a;
       steerAroundWalls(unit, tx, ty, dt);
@@ -1056,10 +1177,12 @@ export function createPoliceSystem(world, vehicles) {
       if (unit.ped) { unit.ped.x = unit.x; unit.ped.z = unit.z; unit.ped.angle = a; }
     }
     // Aim + shoot: on the ring (or close), still target, pistol
-    // range, line of sight. The ped faces Rey and the aim pose
-    // shows the pistol; each officer fires on their own timer.
+    // range, line of sight — OR engaged: an officer who is aimed
+    // at or shot aims back and shoots even while Rey moves. The
+    // ped faces Rey and the aim pose shows the pistol; each
+    // officer fires on their own timer.
     const inRange = dp < OFFICER_FIRE_RANGE;
-    const aiming = surrounding && inRange && hasLineOfSight(unit.x, unit.z, player, OFFICER_FIRE_RANGE);
+    const aiming = (surrounding || engaged) && inRange && hasLineOfSight(unit.x, unit.z, player, OFFICER_FIRE_RANGE);
     if (unit.ped) {
       unit.ped.aiming = aiming;
       if (aiming) unit.ped.angle = Math.atan2(player.z - unit.ped.z, player.x - unit.ped.x);
@@ -1069,27 +1192,23 @@ export function createPoliceSystem(world, vehicles) {
       unit.fireT -= dt;
       if (unit.fireT <= 0) {
         unit.fireT = OFFICER_FIRE_GAP + (sys.spawnSeq % 5) * 0.08;
-        damagePlayer(player, OFFICER_FIRE_DMG);
+        // r11 B2 (Khase 19:43) — no perfect hitscan: the shot is
+        // a spread cone, so it can miss — more often at range and
+        // against a moving target. A moving player who returns
+        // fire can survive; a stationary one still gets hit
+        // often enough that the standoff has teeth.
+        if (Math.random() < policeShotHitChance(dp, !sys.playerStill)) {
+          damagePlayer(player, OFFICER_FIRE_DMG);
+        }
       }
     } else {
       unit.fireT = Math.max(unit.fireT - dt, 0);
     }
-    // The close-range arrest (r10 B6, kept): an officer who RUNS Rey
-    // down and holds him within 15 m for 1.2 s busts him. Officers
-    // already in the standoff ring do NOT use this rule — the 6 s
-    // still-timer governs the surround, or the ring would bust Rey
-    // in 1.2 s and the 6 s rule could never fire.
-    if (!unit.leaving && !player.vehicle && !surrounding) {
-      const dp2 = dist2(unit.x, unit.z, player.x, player.z);
-      if (dp2 < BUST_DIST) {
-        unit.bustT += dt;
-        if (unit.bustT > BUST_HOLD) applyBusted(player);
-      } else {
-        unit.bustT = 0;
-      }
-    } else {
-      unit.bustT = 0;
-    }
+    // r11 B2 — no close-range arrest any more: the 1.2 s hold
+    // bust is gone with the 6 s still-timer. Only a full minute
+    // of zero input busts Rey now (see the BUSTED clock in
+    // update) — an officer who runs Rey down shoots him, he
+    // does not arrest a player who is still fighting back.
   }
 
   // BUSTED: the mission fails, the PVPD takes a fine, the heat clears
@@ -1102,6 +1221,7 @@ export function createPoliceSystem(world, vehicles) {
     const missionId = sys.missionId || null;
     sys.busted = { at: sys.time, fine, mission: missionId };
     sys.bustedT = 0;
+    sys.idleT = 0; // r11 B2: the idle clock dies with the arrest
     sys.wanted = 0;
     sys.queue = [];
     sys.heli = null;
@@ -1147,8 +1267,10 @@ export function createPoliceSystem(world, vehicles) {
       heli.fireT = (heli.fireT || 0) - dt;
       if (heli.fireT <= 0) {
         heli.fireT = HELI_FIRE_GAP;
-        if (dist2(heli.x, heli.z, player.x, player.z) < HELI_FIRE_RANGE &&
-            hasLineOfSight(heli.x, heli.z, player, HELI_FIRE_RANGE)) {
+        const hd = dist2(heli.x, heli.z, player.x, player.z);
+        if (hd < HELI_FIRE_RANGE &&
+            hasLineOfSight(heli.x, heli.z, player, HELI_FIRE_RANGE) &&
+            Math.random() < policeShotHitChance(hd, !sys.playerStill)) {
           damagePlayer(player, HELI_FIRE_DMG);
         }
       }
@@ -1158,6 +1280,65 @@ export function createPoliceSystem(world, vehicles) {
   function updateHeli(player, dt) {
     if (sys.heli) stepHeli(sys.heli, player, dt, 0);
     if (sys.heli2) stepHeli(sys.heli2, player, dt, Math.PI);
+  }
+
+  // r11 B2 — car-car collision: police cars must not pass through
+  // each other or through Rey's car. Simple circle push-apart in
+  // the ground plane, after the drive step: two cruisers that
+  // converge on the same point end up side by side, never merged
+  // into one object, and a cruiser reaching Rey's car is pushed
+  // off it. The hero car is never moved — main3d owns it — the
+  // cruiser yields. Contact scrubs speed on both sides.
+  function separateCars(player) {
+    const cars = [];
+    for (const u of sys.units) {
+      if (u.kind === 'foot' || u.leaving) continue;
+      cars.push(u);
+    }
+    const minD = POLICE_CAR_RADIUS * 2;
+    for (let i = 0; i < cars.length; i++) {
+      for (let j = i + 1; j < cars.length; j++) {
+        const a = cars[i];
+        const b = cars[j];
+        let dx = b.x - a.x;
+        let dz = b.z - a.z;
+        const d = Math.hypot(dx, dz);
+        if (d >= minD) continue;
+        // Coincident cars (d ~ 0) have no push direction: shove
+        // along +X, but the push itself still uses the TRUE gap,
+        // or two cars on one spot only separate to 4.3 m, not 5.3.
+        const push = (minD - d) / 2 + 0.05;
+        const nx = d < 0.001 ? 1 : dx / d;
+        const nz = d < 0.001 ? 0 : dz / d;
+        const ax = a.x - nx * push;
+        const az = a.z - nz * push;
+        const bx = b.x + nx * push;
+        const bz = b.z + nz * push;
+        if (!w.isSolid(ax, az)) { a.x = ax; a.z = az; }
+        if (!w.isSolid(bx, bz)) { b.x = bx; b.z = bz; }
+        a.speed *= 0.8;
+        b.speed *= 0.8;
+        syncBody(a);
+        syncBody(b);
+      }
+    }
+    if (player.vehicle && player.vehicle.kind !== 'heli') {
+      const minP = POLICE_CAR_RADIUS + PLAYER_CAR_RADIUS;
+      for (const u of cars) {
+        const dx = u.x - player.x;
+        const dz = u.z - player.z;
+        const d = Math.hypot(dx, dz);
+        if (d >= minP) continue;
+        const nx = d < 0.001 ? 1 : dx / d;
+        const nz = d < 0.001 ? 0 : dz / d;
+        const push = minP - d + 0.05;
+        const px = u.x + nx * push;
+        const pz = u.z + nz * push;
+        if (!w.isSolid(px, pz)) { u.x = px; u.z = pz; }
+        u.speed *= 0.8;
+        syncBody(u);
+      }
+    }
   }
 
   // Contact: a RAMMING or PIT unit that reaches Rey's car bends it —
@@ -1212,6 +1393,7 @@ export function createPoliceSystem(world, vehicles) {
     sys.searching = false;
     sys.busted = null;
     sys.bustedT = 0;
+    sys.idleT = 0; // r11 B2: a fresh chase starts with a fresh clock
     sys.prevPX = null;
     sys.prevPZ = null;
     const comp = desiredComposition(stars);
@@ -1235,12 +1417,19 @@ export function createPoliceSystem(world, vehicles) {
   // when nothing else raised it yet. Firing on a police unit
   // escalates the heat faster.
   function reportGunfire(result, player) {
+    // r11 B2 — a shot is input: it resets the BUSTED idle clock.
+    noteInput();
     const t = sys.time;
     sys.heat.shots++;
     sys.heat.shotsSinceEsc++;
     sys.heat.lastShotT = t;
     if (result && result.target && (result.target.police || result.target.officer)) {
       sys.heat.shotPolice = true;
+      // r11 B2 — a shot that lands on an officer: that officer
+      // fights back. Find the unit that owns this ped and engage it.
+      for (const u of sys.units) {
+        if (u.ped && u.ped === result.target) { u.threatT = THREAT_HOLD_S; break; }
+      }
     }
     if (sys.wanted === 0 && !sys.pendingWanted) {
       sys.pendingWanted = { level: 1, at: t + 0.8 };
@@ -1305,6 +1494,11 @@ export function createPoliceSystem(world, vehicles) {
     if (events && events.missionId) sys.missionId = events.missionId;
     if (events && events.gunfire) reportGunfire({ target: events.gunfire.target || null }, player);
     if (events && events.crime) reportCrime(events.crime, player);
+    // r11 B2 — an input event from the game (a key, a mouse move
+    // or click, passed in by main3d) resets the BUSTED idle clock.
+    // Shots reset it inside reportGunfire; movement resets it
+    // below, once it counts as real movement (playerStill).
+    if (events && events.input) noteInput();
     let wanted = sys.wanted;
 
     // Still or moving (r10 B6): displacement since last frame. On
@@ -1330,6 +1524,10 @@ export function createPoliceSystem(world, vehicles) {
       : sys.playerSpeed >= 0.6;
     sys.movingT = movingNow ? (sys.movingT || 0) + dt : 0;
     sys.playerStill = (sys.movingT || 0) < 0.5;
+    // r11 B2 — real movement is input: while Rey is actually
+    // moving the idle clock below stays at 0 (it only grows while
+    // playerStill). A single shove frame (a cruiser pushing Rey
+    // clear) does not count — playerStill debounces that to 0.5 s.
 
     // A star scheduled by a crime lands a moment after the shot.
     if (sys.pendingWanted && t >= sys.pendingWanted.at) {
@@ -1421,6 +1619,7 @@ export function createPoliceSystem(world, vehicles) {
         unit.leaving = true;
         unit.leaveT = 0;
       }
+      updateUnitSight(unit, player, dt); // r11 B2: per-unit fix/search
       if (unit.kind === 'foot') driveFoot(unit, player, dt);
       else driveVehicle(unit, player, dt);
       if (unit.leaving) {
@@ -1434,30 +1633,42 @@ export function createPoliceSystem(world, vehicles) {
     updateHeli(player, dt);
     for (const u of sys.units) updateSiren(u);
     contactHits(player, dt);
+    separateCars(player); // r11 B2: police cars never merge
 
-    // The BUSTED clock (r10 B6): Rey holding still while at least
-    // two officers are aiming at him from the ring. Moving, or the
-    // ring breaking, resets it — running is always an out.
-    if (wanted > 0 && sys.playerStill) {
-      let aimers = 0;
-      for (const u of sys.units) {
-        if (u.kind === 'foot' && u.ped && u.ped.aiming &&
-            dist2(u.x, u.z, player.x, player.z) < 30) aimers++;
-      }
-      if (aimers >= 2) {
-        sys.bustedT += dt;
-        if (sys.bustedT >= BUSTED_STILL_S) applyBusted(player);
-      } else {
-        sys.bustedT = 0;
-      }
+    // The BUSTED clock (r11 B2): BUSTED fires ONLY on a full
+    // minute of zero input while wanted — no WASD, no mouse
+    // move/click, no keys, no shooting. The clock resets on any
+    // input (noteInput from the listeners, reportGunfire, or real
+    // movement above), so shooting police or moving out of a
+    // standoff can never bust Rey, however long it lasts. The
+    // surround/aim/shoot pressure stays — it just cannot arrest
+    // a player who is still fighting back. No wanted, no clock.
+    // The clock only grows while Rey is actually still: a moving
+    // player holds it at exactly 0 (and a key/mouse/shot resets
+    // it outright via noteInput / reportGunfire).
+    if (sys.wanted > 0 && sys.playerStill) {
+      sys.idleT += dt;
+      sys.bustedT = sys.idleT;
+      if (sys.idleT >= BUSTED_IDLE_S) applyBusted(player);
     } else {
+      sys.idleT = 0;
       sys.bustedT = 0;
     }
 
     // Sight: any unit (or AIR-1) with eyes on Rey refreshes the last
     // seen point. Nobody seeing him starts the search clock.
-    let anySee = false;
-    if (sys.heli && hasLineOfSight(sys.heli.x, sys.heli.z, player, SIGHT_HELI)) anySee = true;
+    // r11 B2: a heli with eyes on Rey radios the fix to every
+    // ground unit's own last-seen point — but not a live fix:
+    // they still have to drive there and re-acquire him themselves.
+    let heliSees = false;
+    if (sys.heli && hasLineOfSight(sys.heli.x, sys.heli.z, player, SIGHT_HELI)) heliSees = true;
+    if (sys.heli2 && hasLineOfSight(sys.heli2.x, sys.heli2.z, player, SIGHT_HELI)) heliSees = true;
+    if (heliSees) {
+      for (const u of sys.units) {
+        if (!u.tracking) u.lastSeenSelf = { x: player.x, z: player.z };
+      }
+    }
+    let anySee = heliSees;
     if (!anySee) {
       for (const u of sys.units) {
         if (u.leaving) continue;
@@ -1472,7 +1683,9 @@ export function createPoliceSystem(world, vehicles) {
       sys.unseenT += dt;
       if (sys.unseenT > SEARCH_DELAY) sys.searching = true;
     }
-    for (const u of sys.units) u.searching = sys.searching;
+    // r11 B2: per-unit searching is owned by updateUnitSight now
+    // (a unit searches when IT loses its fix, not when the fleet
+    // does) — sys.searching above stays the global HUD/escape flag.
 
     // Escape: unseen long enough, and the nearest unit far away, and
     // a star blinks out. One star per escape window, so a five-star
@@ -1524,13 +1737,23 @@ export function createPoliceSystem(world, vehicles) {
       units: sys.units.filter((u) => !u.leaving).length,
       foot: countFoot(),
       playerStill: sys.playerStill,
-      bustedIn: sys.bustedT > 0 ? Math.max(0, +(BUSTED_STILL_S - sys.bustedT).toFixed(1)) : null,
+      idleSeconds: +sys.idleT.toFixed(1), // r11 B2: seconds since last input
+      bustedIn: sys.wanted > 0 ? Math.max(0, +(BUSTED_IDLE_S - sys.idleT).toFixed(1)) : null,
       dispatch: dispatchRows(player),
       busted: sys.busted,
     };
   }
 
+  // r11 B2 — any input at all (key, mouse move/click) resets the
+  // BUSTED idle clock. Called from main3d's input listeners and
+  // from reportGunfire; update() also honours events.input.
+  function noteInput() {
+    sys.idleT = 0;
+    sys.bustedT = 0;
+  }
+
   sys.update = update;
+  sys.noteInput = noteInput;
   sys.dispatchRows = dispatchRows;
   sys.stageChase = stageChase;
   sys.setWanted = setWanted;
@@ -1541,4 +1764,4 @@ export function createPoliceSystem(world, vehicles) {
   return sys;
 }
 
-export { HELI_STARS, HELI2_STARS, BUSTED_STILL_S, MAX_FOOT, MAX_WANTED, CALLSIGNS };
+export { HELI_STARS, HELI2_STARS, BUSTED_IDLE_S, MAX_FOOT, MAX_WANTED, CALLSIGNS, policeShotHitChance };

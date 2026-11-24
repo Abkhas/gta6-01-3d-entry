@@ -25,13 +25,14 @@
 
   var CATALOGUE = { missions: 10, activities: 28, vehicles: 18, weapons: 8, districts: 7, radio: 3 };
 
+  // r11-B1: SETTINGS is no longer a systems tab — it opens the
+  // dedicated settings panel (showSettings), never the dashboard.
   var TABS = [
     { id: 'map', label: 'MAP' },
     { id: 'missions', label: 'MISSIONS' },
     { id: 'stats', label: 'STATS' },
     { id: 'crew', label: 'CREW' },
-    { id: 'garage', label: 'GARAGE' },
-    { id: 'settings', label: 'SETTINGS' }
+    { id: 'garage', label: 'GARAGE' }
   ];
 
   // Column geometry for the 1280x720 design frame.
@@ -574,6 +575,10 @@
   var systemsTab = 'map';
 
   function showSystems(state, city, opts) {
+    // r11-B1: a settings request never renders the dashboard — it
+    // opens the dedicated settings panel instead (old callers pass
+    // { tab: 'settings' }).
+    if (opts && opts.tab === 'settings') { showSettings(state, opts); return null; }
     hideSystems();
     var nums = dashNumbers(state);
     var root = el('div', 'pv3d-systems', document.body);
@@ -754,13 +759,233 @@
     return !!systemsRoot;
   }
 
+  // ---- settings panel (r11-B1) ----------------------------------------
+  // A DEDICATED panel — never the systems dashboard. Opens from the
+  // title menu (Settings) and from the pause menu's old settings
+  // route (showSystems delegates { tab: 'settings' } here). Four
+  // sections: Controls (read-only binding list), Audio, Graphics,
+  // Gameplay. Values persist in localStorage (pv3d-settings-v1) and
+  // are exposed on window.PalmaSettings so the engine can read them;
+  // Graphics applies LIVE to the renderer (DPR + shadows) because
+  // that is the one the engine exposes a hook for. Audio has no
+  // live engine hook in this build (the radio is a text/now-playing
+  // system, no gain node) and aim sensitivity/invert have none
+  // either (aim is a ground-plane raycast in main3d) — those values
+  // are stored, shown, and honoured by the next engine pass that
+  // wires them in; they are NOT silently dropped on close.
+  var SETTINGS_KEY = 'pv3d-settings-v1';
+  var SETTINGS_DEFAULTS = {
+    music: 80, sfx: 80, muted: false,
+    quality: 'high', shadows: true, dpr: 'auto',
+    invertAim: false, aimSensitivity: 1.0, subtitles: true
+  };
+  var BINDINGS = [
+    ['Move', 'W A S D / Arrow keys'],
+    ['Jump', 'Space'],
+    ['Aim', 'Right mouse button'],
+    ['Fire', 'Left mouse button'],
+    ['Weapon wheel', 'Tab'],
+    ['Radio — next station', 'Q'],
+    ['Use / enter / exit', 'E'],
+    ['Crew — Tuck: Swap Plates', 'Z'],
+    ['Crew — Ines: Quick Fix', 'X'],
+    ['Crew — Kip: Eyes Out', 'V'],
+    ['Quick save (slot 1)', 'F9'],
+    ['Pause / resume', 'Esc'],
+    ['Retry mission', 'T']
+  ];
+
+  function loadSettings() {
+    var s = {};
+    for (var k in SETTINGS_DEFAULTS) s[k] = SETTINGS_DEFAULTS[k];
+    try {
+      var raw = (typeof localStorage !== 'undefined') ? localStorage.getItem(SETTINGS_KEY) : null;
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        for (var k2 in parsed) {
+          if (k2 in s) s[k2] = parsed[k2];
+        }
+      }
+    } catch (e) { /* corrupt store: defaults stand */ }
+    return s;
+  }
+
+  function saveSettings(s) {
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    } catch (e) { /* private mode: in-memory only */ }
+  }
+
+  function applySettings(s) {
+    // Graphics only: the renderer's DPR ladder + shadow switch are
+    // the live hooks this build exposes (main3d r9 A2: live-play DPR
+    // floor 1.25, shot DPR 2 — a settings DPR below the floor would
+    // blur the game, so '1' clamps to the 1.25 floor).
+    try {
+      var pal = window.__palma3d;
+      if (pal && pal.renderer) {
+        var dpr = 2;
+        if (s.dpr && s.dpr !== 'auto') dpr = Math.max(1.25, parseFloat(s.dpr) || 2);
+        else if (s.quality === 'medium') dpr = 1.5;
+        else if (s.quality === 'low') dpr = 1.25;
+        else dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1.25), 2);
+        pal.renderer.setPixelRatio(dpr);
+        pal.renderer.shadowMap.enabled = !!s.shadows;
+      }
+    } catch (e) { /* headless/test DOM without a renderer */ }
+  }
+
+  var settingsRoot = null;
+  var settingsEscHandler = null;
+
+  function showSettings(state, opts) {
+    hideSettings();
+    var s = loadSettings();
+    var root = el('div', 'pv3d-settings', document.body);
+    settingsRoot = root;
+    var panel = el('div', 'pv3d-settings-panel', root);
+    var head = el('div', 'pv3d-settings-head', panel);
+    setText(el('div', 'pv3d-settings-title', head), 'SETTINGS');
+    setText(el('div', 'pv3d-settings-sub', head), 'Palma Verde — controls, audio, graphics, gameplay');
+
+    function section(title) {
+      var sec = el('div', 'pv3d-set-section', panel);
+      setText(el('div', 'pv3d-set-section-title', sec), title);
+      return sec;
+    }
+    function row(sec, label, control) {
+      var r = el('div', 'pv3d-set-row', sec);
+      setText(el('span', 'pv3d-set-label', r), label);
+      var wrap = el('span', 'pv3d-set-control', r);
+      wrap.appendChild(control);
+      return r;
+    }
+    function slider(cls, val, min, max, step) {
+      var inp = document.createElement('input');
+      inp.type = 'range'; inp.className = cls;
+      inp.min = String(min); inp.max = String(max); inp.step = String(step);
+      inp.value = String(val);
+      return inp;
+    }
+    function checkbox(cls, checked) {
+      var inp = document.createElement('input');
+      inp.type = 'checkbox'; inp.className = cls;
+      inp.checked = !!checked;
+      return inp;
+    }
+    function select(cls, options, val) {
+      var sel = document.createElement('select');
+      sel.className = cls;
+      for (var i = 0; i < options.length; i++) {
+        var o = document.createElement('option');
+        o.value = options[i][0];
+        setText(o, options[i][1]);
+        if (options[i][0] === val) o.selected = true;
+        sel.appendChild(o);
+      }
+      return sel;
+    }
+    function valSpan(text) {
+      var sp = el('span', 'pv3d-set-value');
+      setText(sp, text);
+      return sp;
+    }
+    function persist() { saveSettings(s); applySettings(s); }
+
+    // CONTROLS — read-only binding list.
+    var controls = section('CONTROLS');
+    for (var bi = 0; bi < BINDINGS.length; bi++) {
+      var brow = el('div', 'pv3d-set-row pv3d-set-binding', controls);
+      setText(el('span', 'pv3d-set-label', brow), BINDINGS[bi][0]);
+      setText(el('span', 'pv3d-set-key', brow), BINDINGS[bi][1]);
+    }
+
+    // AUDIO — sliders + mute (stored + exposed; no live gain hook
+    // in this build — see the header comment).
+    var audio = section('AUDIO');
+    var musicVal = valSpan(s.music + '%');
+    var music = slider('pv3d-set-music', s.music, 0, 100, 1);
+    music.addEventListener('input', function () { s.music = +music.value; setText(musicVal, s.music + '%'); persist(); });
+    row(audio, 'Music volume', music).appendChild(musicVal);
+    var sfxVal = valSpan(s.sfx + '%');
+    var sfx = slider('pv3d-set-sfx', s.sfx, 0, 100, 1);
+    sfx.addEventListener('input', function () { s.sfx = +sfx.value; setText(sfxVal, s.sfx + '%'); persist(); });
+    row(audio, 'SFX volume', sfx).appendChild(sfxVal);
+    var mute = checkbox('pv3d-set-mute', s.muted);
+    mute.addEventListener('change', function () { s.muted = !!mute.checked; persist(); });
+    row(audio, 'Mute all audio', mute);
+
+    // GRAPHICS — applies live to the renderer on every change.
+    var graphics = section('GRAPHICS');
+    var quality = select('pv3d-set-quality', [['high', 'High'], ['medium', 'Medium'], ['low', 'Low']], s.quality);
+    quality.addEventListener('change', function () { s.quality = quality.value; persist(); });
+    row(graphics, 'Quality', quality);
+    var shadows = checkbox('pv3d-set-shadows', s.shadows);
+    shadows.addEventListener('change', function () { s.shadows = !!shadows.checked; persist(); });
+    row(graphics, 'Shadows', shadows);
+    var dpr = select('pv3d-set-dpr', [['auto', 'Auto'], ['1', '1.0×'], ['1.25', '1.25×'], ['1.5', '1.5×'], ['2', '2.0×']], s.dpr);
+    dpr.addEventListener('change', function () { s.dpr = dpr.value; persist(); });
+    row(graphics, 'Resolution (DPR)', dpr);
+
+    // GAMEPLAY — stored + exposed (see the header comment).
+    var gameplay = section('GAMEPLAY');
+    var invert = checkbox('pv3d-set-invert', s.invertAim);
+    invert.addEventListener('change', function () { s.invertAim = !!invert.checked; persist(); });
+    row(gameplay, 'Invert aim', invert);
+    var sensVal = valSpan(s.aimSensitivity.toFixed(1) + '×');
+    var sens = slider('pv3d-set-sens', s.aimSensitivity, 0.5, 2, 0.1);
+    sens.addEventListener('input', function () { s.aimSensitivity = +sens.value; setText(sensVal, s.aimSensitivity.toFixed(1) + '×'); persist(); });
+    row(gameplay, 'Aim sensitivity', sens).appendChild(sensVal);
+    var subs = checkbox('pv3d-set-subtitles', s.subtitles);
+    subs.addEventListener('change', function () { s.subtitles = !!subs.checked; persist(); });
+    row(gameplay, 'Subtitles', subs);
+
+    var foot = el('div', 'pv3d-settings-foot', panel);
+    var back = el('button', 'pv3d-settings-back', foot);
+    setText(back, '← BACK');
+    back.addEventListener('click', function () { hideSettings(); });
+    setText(el('div', 'pv3d-settings-hint', foot), 'ESC — BACK');
+
+    settingsEscHandler = function (ev) {
+      if (ev && ev.code === 'Escape' && settingsVisible()) {
+        if (ev.stopPropagation) ev.stopPropagation();
+        hideSettings();
+      }
+    };
+    try { window.addEventListener('keydown', settingsEscHandler); } catch (e) { /* stubbed DOM */ }
+    applySettings(s);
+    return root;
+  }
+
+  function hideSettings() {
+    if (settingsEscHandler) {
+      try { window.removeEventListener('keydown', settingsEscHandler); } catch (e) { /* ignore */ }
+      settingsEscHandler = null;
+    }
+    if (settingsRoot && settingsRoot.parentNode) {
+      settingsRoot.parentNode.removeChild(settingsRoot);
+    }
+    settingsRoot = null;
+  }
+
+  function settingsVisible() {
+    return !!settingsRoot;
+  }
+
+  if (typeof window !== 'undefined') {
+    window.PalmaSettings = {
+      get: loadSettings,
+      save: function (s) { saveSettings(s); applySettings(s); },
+      apply: function () { applySettings(loadSettings()); }
+    };
+  }
+
   // ---- title screen ------------------------------------------------------
-  // Sunset skyline behind the title: two rows of buildings with lit
-  // windows (no signs — the old named signs collided with the menu
-  // and slot text), a low sun, sand beach with a turquoise sea
-  // strip, palms and an umbrella in front. Big gradient headline
-  // top-left, bare menu left with description lines, save slots
-  // with progress and Load buttons right.
+  // r11-B1: the live 3D city is the background (golden-hour camera
+  // loop driven by main3d); the DOM is only a translucent scrim
+  // plus drifting CSS clouds/birds, a big gradient headline, a bare
+  // menu left with description lines, and save slots with progress
+  // and Load buttons right.
 
   var titleRoot = null;
   // Mouse-movement generation: incremented on every real mousemove.
@@ -795,62 +1020,21 @@
     titleRoot = root;
     var sky = el('div', 'pv3d-title-sky', root);
 
-    // Back row: dark silhouettes.
-    var bx = -20, bi = 0;
-    while (bx < 1280) {
-      var bw = 90 + hashRand(bi, 1) * 60;
-      var bh = 150 + hashRand(bi, 2) * 130;
-      var back = el('div', 'pv3d-sky-back', sky);
-      back.style.left = bx + 'px';
-      back.style.width = bw + 'px';
-      back.style.height = bh + 'px';
-      back.style.bottom = '300px';
-      for (var wy = 0; wy < 6; wy++) {
-        for (var wx = 0; wx < 4; wx++) {
-          if (hashRand(bi, wy * 10 + wx) > 0.6) {
-            var win = el('div', 'pv3d-sky-win', back);
-            win.style.left = (12 + wx * 20) + 'px';
-            win.style.top = (16 + wy * 22) + 'px';
-          }
-        }
-      }
-      bx += bw + 8;
-      bi++;
+    // r11-B1: the flat DOM diorama is GONE — the live 3D city is
+    // the title background now (main3d drives a slow golden-hour
+    // camera loop behind this overlay; the sky div is only a
+    // translucent scrim so the text reads). What the DOM still adds
+    // is motion the 3D scene cannot: three soft clouds drifting
+    // across the sky and two birds crossing it, all pure CSS.
+    var cloud;
+    for (var ci2 = 0; ci2 < 3; ci2++) {
+      cloud = el('div', 'pv3d-title-cloud pv3d-title-cloud-' + (ci2 + 1), sky);
     }
-    // Front row: nearer buildings, windows only — no signs.
-    var fx = -10, fi = 0;
-    while (fx < 1280) {
-      var fw = 80 + hashRand(fi, 3) * 60;
-      var fh = 90 + hashRand(fi, 4) * 110;
-      var front = el('div', 'pv3d-sky-front', sky);
-      front.style.left = fx + 'px';
-      front.style.width = fw + 'px';
-      front.style.height = (fh + 40) + 'px';
-      front.style.bottom = '276px';
-      for (var fy = 0; fy < 5; fy++) {
-        for (var fwx = 0; fwx < 4; fwx++) {
-          if (hashRand(fi, fy * 10 + fwx + 5) > 0.5) {
-            var win2 = el('div', 'pv3d-sky-win pv3d-sky-win-warm', front);
-            win2.style.left = (10 + fwx * 18) + 'px';
-            win2.style.top = (16 + fy * 20) + 'px';
-          }
-        }
-      }
-      fx += fw + 14;
-      fi++;
+    var bird;
+    for (var bi2 = 0; bi2 < 2; bi2++) {
+      bird = el('div', 'pv3d-title-bird pv3d-title-bird-' + (bi2 + 1), sky);
+      setText(bird, '⌄');
     }
-    // Low sun in the gap between headline and slots, sand beach
-    // with a turquoise sea strip along the bottom, palms and an
-    // umbrella on the sand clear of the footer and the slot cards.
-    var sun = el('div', 'pv3d-title-sun', sky);
-    var ground = el('div', 'pv3d-title-ground', sky);
-    var sea = el('div', 'pv3d-title-sea', sky);
-    var palm1 = el('div', 'pv3d-title-palm', sky);
-    palm1.style.left = '70px';
-    var palm2 = el('div', 'pv3d-title-palm', sky);
-    palm2.style.left = '700px';
-    var umb = el('div', 'pv3d-title-umbrella', sky);
-    umb.style.left = '620px';
 
     var stage = el('div', 'pv3d-title-stage', root);
     var headline = el('div', 'pv3d-title-headline', stage);
@@ -879,7 +1063,7 @@
     var menu = [
       { key: 'CONTINUE', label: 'Continue', desc: contDesc },
       { key: 'NEW GAME', label: 'New Game', desc: 'Rey Calder owes Nadia Venn $2,000. The city is open.' },
-      { key: 'SETTINGS', label: 'Settings', desc: 'Keyboard and mouse' }
+      { key: 'SETTINGS', label: 'Settings', desc: 'Keyboard and mouse · controls, audio, graphics, gameplay' }
     ];
     var sel = (opts && typeof opts.selectedMenu === 'number') ? opts.selectedMenu : lastMenuSel;
     if (sel === 3) sel = 2; // r8 SETTINGS was index 3, now 2
@@ -1116,27 +1300,37 @@
       // x760; menu ends y~490, slots end y~650, footer y~686 —
       // no text sits over another element's text.
       '.pv3d-title{position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:8;font-family:system-ui,sans-serif;color:#e8e8e8;overflow:hidden}',
-      '.pv3d-title-sky{position:absolute;left:0;top:0;width:100%;height:100%;background:linear-gradient(180deg,#31235c 0%,#7a3a6e 42%,#ff8a4f 72%,#ffc46b 100%)}',
-      '.pv3d-title-sun{position:absolute;left:44%;top:24%;width:68px;height:68px;border-radius:50%;background:#ffe9b8;box-shadow:0 0 90px 40px rgba(255,196,107,0.35)}',
-      '.pv3d-sky-back{position:absolute;background:#2e1f38}',
-      '.pv3d-sky-front{position:absolute;background:#20142c;border-top:3px solid #ffd166}',
-      '.pv3d-sky-win{position:absolute;width:8px;height:10px;background:rgba(255,209,102,0.5)}',
-      '.pv3d-sky-win-warm{background:#ffd166}',
-      '.pv3d-title-ground{position:absolute;left:0;right:0;bottom:0;height:276px;background:linear-gradient(180deg,#d9b078 0%,#c79c62 100%);border-top:3px solid rgba(255,209,102,0.6)}',
-      '.pv3d-title-sea{position:absolute;left:0;right:0;bottom:0;height:54px;background:linear-gradient(180deg,#35c4b5 0%,#1f8f96 100%)}',
-      '.pv3d-title-palm{position:absolute;bottom:64px;width:4px;height:56px;background:#1d2b26}',
-      '.pv3d-title-umbrella{position:absolute;bottom:64px;width:40px;height:20px;border-radius:20px 20px 0 0;background:#e2725b}',
+      // r11-B1: the sky div is now a TRANSLUCENT scrim over the live
+      // 3D city — a left band for the menu, a dark top for the
+      // headline, a dark bottom for the slots/footer — never opaque.
+      // The flat DOM diorama (silhouettes / sun / sea / palms) is
+      // gone; the 3D scene is the background. Clouds + birds are the
+      // only DOM motion, pure CSS keyframes.
+      '.pv3d-title-sky{position:absolute;left:0;top:0;width:100%;height:100%;background:linear-gradient(90deg,rgba(5,8,14,0.55) 0%,rgba(5,8,14,0.28) 38%,rgba(5,8,14,0) 62%),linear-gradient(180deg,rgba(8,6,18,0.62) 0%,rgba(8,6,18,0.25) 22%,rgba(8,6,18,0.05) 55%,rgba(5,8,14,0.45) 80%,rgba(5,8,14,0.68) 100%)}',
+      '@keyframes pv3d-cloud-drift{from{transform:translateX(-260px)}to{transform:translateX(1400px)}}',
+      '@keyframes pv3d-bird-fly{0%{transform:translate(0,0)}25%{transform:translate(320px,-26px)}50%{transform:translate(640px,4px)}75%{transform:translate(960px,-20px)}100%{transform:translate(1320px,0)}}',
+      '.pv3d-title-cloud{position:absolute;border-radius:50%;background:rgba(255,244,220,0.5);filter:blur(14px);animation:pv3d-cloud-drift linear infinite}',
+      '.pv3d-title-cloud-1{left:0;top:64px;width:220px;height:44px;animation-duration:78s}',
+      '.pv3d-title-cloud-2{left:0;top:150px;width:150px;height:32px;animation-duration:105s;animation-delay:-40s;opacity:0.7}',
+      '.pv3d-title-cloud-3{left:0;top:36px;width:300px;height:54px;animation-duration:140s;animation-delay:-90s;opacity:0.55}',
+      '.pv3d-title-bird{position:absolute;font-size:22px;font-weight:700;color:rgba(20,12,8,0.75);animation:pv3d-bird-fly linear infinite}',
+      '.pv3d-title-bird-1{left:-40px;top:110px;animation-duration:26s}',
+      '.pv3d-title-bird-2{left:-40px;top:190px;animation-duration:34s;animation-delay:-17s;font-size:17px}',
+      '@media (prefers-reduced-motion: reduce){.pv3d-title-cloud,.pv3d-title-bird{animation:none}}',
       '.pv3d-title-stage{position:absolute;left:0;top:0;width:1280px;height:720px}',
-      '.pv3d-title-headline{position:absolute;left:48px;top:28px;font-size:88px;line-height:1;font-weight:800;letter-spacing:2px;background:linear-gradient(180deg,#ffe9a8 0%,#ffb347 45%,#ff7a59 100%);-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 3px 10px rgba(0,0,0,0.45))}',
-      '.pv3d-title-tagline{position:absolute;left:50px;top:140px;font-size:22px;font-weight:600;color:#2ec4b6;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',
+      // r11-B1: headline legibility — the gradient text keeps its
+      // fill, but now sits on a hard dark offset shadow (reads as
+      // an outline against a bright sky) plus a deep soft shadow.
+      '.pv3d-title-headline{position:absolute;left:48px;top:28px;font-size:88px;line-height:1;font-weight:800;letter-spacing:2px;background:linear-gradient(180deg,#ffe9a8 0%,#ffb347 45%,#ff7a59 100%);-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 2px 0 rgba(10,5,0,0.85)) drop-shadow(0 8px 22px rgba(0,0,0,0.8))}',
+      '.pv3d-title-tagline{position:absolute;left:50px;top:140px;font-size:22px;font-weight:600;color:#2ec4b6;text-shadow:0 2px 8px rgba(0,0,0,0.95),0 0 3px rgba(0,0,0,0.9)}',
       '.pv3d-title-menu{position:absolute;left:48px;top:240px;width:460px;user-select:none}',
       '.pv3d-title-menu-item{padding:12px 0;cursor:pointer;user-select:none}',
-      '.pv3d-title-menu-label{font-size:30px;font-weight:700;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',
-      '.pv3d-title-menu-desc{font-size:13px;color:#d7dde8;margin-top:4px;text-shadow:0 1px 4px rgba(0,0,0,0.6)}',
+      '.pv3d-title-menu-label{font-size:30px;font-weight:700;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,0.95),0 0 3px rgba(0,0,0,0.9)}',
+      '.pv3d-title-menu-desc{font-size:13px;color:#d7dde8;margin-top:4px;text-shadow:0 2px 6px rgba(0,0,0,0.95),0 0 3px rgba(0,0,0,0.9)}',
       '.pv3d-title-menu-selected .pv3d-title-menu-label{color:#ffd166}',
       '.pv3d-title-menu-item:hover .pv3d-title-menu-label{color:#ffd166}',
       '.pv3d-title-slots{position:absolute;left:760px;top:136px;width:472px}',
-      '.pv3d-title-slots-head{font-size:15px;font-weight:700;color:#ffd166;margin-bottom:4px;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',
+      '.pv3d-title-slots-head{font-size:15px;font-weight:700;color:#ffd166;margin-bottom:4px;text-shadow:0 2px 8px rgba(0,0,0,0.95),0 0 3px rgba(0,0,0,0.9)}',
       '.pv3d-title-slots .pv3d-slot{position:relative;min-height:136px;background:#0d1626;border:1px solid rgba(255,255,255,0.25);border-left:4px solid #2ec4b6;padding:10px 14px;margin-top:10px;cursor:pointer;user-select:none}',
       '.pv3d-title-slots .pv3d-slot:hover{border-color:#ffd166}',
       '.pv3d-title-slots .pv3d-slot-head{color:#2ec4b6}',
@@ -1148,7 +1342,28 @@
       '.pv3d-title-slot-fill{height:100%;background:#ff8a4f}',
       '.pv3d-title-slot-load{background:#2ec4b6;color:#08211e;border:0;padding:5px 16px;font-size:13px;font-weight:700;cursor:pointer}',
       '.pv3d-title-slot-load:hover{background:#4fd8cb}',
-      '.pv3d-title-foot{position:absolute;left:48px;bottom:16px;font-size:13px;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,0.6)}'
+      '.pv3d-title-foot{position:absolute;left:48px;bottom:16px;font-size:13px;color:#fff;text-shadow:0 2px 8px rgba(0,0,0,0.95),0 0 3px rgba(0,0,0,0.9)}',
+      // r11-B1 settings panel: centred card over a dimmed backdrop,
+      // above the title (z 8) and the systems screen (z 8).
+      '.pv3d-settings{position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:9;background:rgba(4,8,14,0.72);display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;color:#e8e8e8}',
+      '.pv3d-settings-panel{width:600px;max-height:680px;overflow-y:auto;background:#0d1626;border:1px solid rgba(255,209,102,0.5);padding:20px 24px}',
+      '.pv3d-settings-head{border-bottom:1px solid rgba(255,255,255,0.15);padding-bottom:10px;margin-bottom:6px}',
+      '.pv3d-settings-title{font-size:24px;font-weight:800;color:#ffd166;letter-spacing:2px}',
+      '.pv3d-settings-sub{font-size:12px;color:#8a8a92;margin-top:4px}',
+      '.pv3d-set-section{margin-top:14px}',
+      '.pv3d-set-section-title{font-size:12px;font-weight:700;color:#2ec4b6;letter-spacing:1px;margin-bottom:6px}',
+      '.pv3d-set-row{display:flex;align-items:center;gap:10px;padding:4px 0;font-size:13px}',
+      '.pv3d-set-label{flex:1;color:#e8e8e8}',
+      '.pv3d-set-control{display:flex;align-items:center;gap:8px}',
+      '.pv3d-set-key{color:#ffd166;font-weight:700;text-align:right}',
+      '.pv3d-set-value{color:#ffd166;font-weight:700;min-width:44px;text-align:right}',
+      '.pv3d-set-row input[type=range]{width:180px;accent-color:#ffd166}',
+      '.pv3d-set-row input[type=checkbox]{width:18px;height:18px;accent-color:#ffd166}',
+      '.pv3d-set-row select{background:#080c12;color:#e8e8e8;border:1px solid rgba(255,255,255,0.3);padding:4px 8px;font-size:13px}',
+      '.pv3d-settings-foot{display:flex;align-items:center;gap:16px;margin-top:18px;border-top:1px solid rgba(255,255,255,0.15);padding-top:14px}',
+      '.pv3d-settings-back{background:#2ec4b6;color:#08211e;border:0;padding:8px 22px;font-size:14px;font-weight:700;cursor:pointer}',
+      '.pv3d-settings-back:hover{background:#4fd8cb}',
+      '.pv3d-settings-hint{font-size:12px;color:#8a8a92}'
     ].join('\n');
     var style = document.createElement('style');
     style.id = 'pv3d-screens-css';
@@ -1165,6 +1380,10 @@
     showSystems: showSystems,
     hideSystems: hideSystems,
     systemsVisible: systemsVisible,
+    showSettings: showSettings,
+    hideSettings: hideSettings,
+    settingsVisible: settingsVisible,
+    getSettings: loadSettings,
     showTitle: showTitle,
     hideTitle: hideTitle,
     titleVisible: titleVisible,

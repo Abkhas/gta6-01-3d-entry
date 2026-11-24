@@ -339,10 +339,70 @@ function makeWheel(detailed) {
   return wrapper;
 }
 
+// ---- drivers (r11 B3) -----------------------------------------------
+// A seated driver in every moving traffic car, visible through the
+// (tinted) glass: head, torso, arms reaching for the wheel, and the
+// wheel itself, plus a seat bench and a dash so the cabin does not
+// read hollow through the glass. Parked cars and mopeds have none
+// (traffic3d hides the figure for those), the hero has none (the
+// player drives it). Built from primitives — no dependency on
+// people3d. Left-hand drive: the seat sits at local z -0.45.
+var DRIVER_SKINS = ['#e8b48f', '#c98d64', '#8a5a3b', '#f0c8a0', '#a06a45'];
+var DRIVER_SHIRTS = ['#3d7ea6', '#c94f3d', '#e8c53a', '#4a6b4f', '#e86a92', '#7a5a9e', '#2e8b7a', '#d97b2b'];
+var DRIVER_HAIRS = ['#2c2c34', '#4a2f1d', '#111111', '#6b6b6b'];
+function buildDriver() {
+  var g = new THREE.Group();
+  g.name = 'driver'; // r11 B3: the headless test finds it by name
+  var skin = DRIVER_SKINS[Math.floor(Math.random() * DRIVER_SKINS.length)];
+  var shirt = DRIVER_SHIRTS[Math.floor(Math.random() * DRIVER_SHIRTS.length)];
+  var hair = DRIVER_HAIRS[Math.floor(Math.random() * DRIVER_HAIRS.length)];
+  var skinMat = paint(skin, 0.65, 0.05);
+  var shirtMat = paint(shirt, 0.75, 0.05);
+  // Seat bench under the driver + dash under the windshield.
+  g.add(box(0.55, 0.30, 1.5, darkMat(), -0.15, 0.72, 0));
+  g.add(box(0.30, 0.12, 1.5, darkMat(), 0.85, 0.95, 0));
+  // Torso, seated: a short capsule from the bench to the shoulders.
+  var torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.19, 0.18, 4, 10), shirtMat);
+  torso.position.set(-0.15, 0.98, -0.45);
+  g.add(torso);
+  // Head + hair cap, just under the roof.
+  var head = new THREE.Mesh(new THREE.SphereGeometry(0.115, 14, 10), skinMat);
+  head.position.set(-0.12, 1.22, -0.45);
+  g.add(head);
+  var hairCap = new THREE.Mesh(
+    new THREE.SphereGeometry(0.122, 14, 10, 0, Math.PI * 2, 0, 1.9),
+    paint(hair, 0.9, 0.05));
+  hairCap.position.set(-0.135, 1.235, -0.45);
+  hairCap.rotation.z = -0.5;
+  g.add(hairCap);
+  // Steering wheel: a dark torus ahead of the driver, its plane
+  // vertical and facing the driver, tipped back toward them.
+  var wheelMount = new THREE.Group();
+  wheelMount.position.set(0.38, 1.02, -0.45);
+  wheelMount.rotation.z = 0.35;
+  var wheel = new THREE.Mesh(new THREE.TorusGeometry(0.19, 0.022, 8, 20), darkMat());
+  wheel.rotation.y = Math.PI / 2;
+  wheelMount.add(wheel);
+  var column = box(0.3, 0.05, 0.05, darkMat(), -0.18, -0.12, 0);
+  column.rotation.z = 0.5;
+  wheelMount.add(column);
+  g.add(wheelMount);
+  // Arms: from the shoulders forward-down to the wheel rim.
+  for (var s = -1; s <= 1; s += 2) {
+    var arm = box(0.5, 0.07, 0.07, shirtMat, 0.12, 1.02, -0.45 + 0.16 * s);
+    arm.rotation.z = -0.12;
+    g.add(arm);
+    var hand = new THREE.Mesh(new THREE.SphereGeometry(0.055, 8, 8), skinMat);
+    hand.position.set(0.36, 0.99, -0.45 + 0.15 * s);
+    g.add(hand);
+  }
+  return g;
+}
+
 // One builder for every car in the city. detail 3 is the hero:
 // racing stripe, spoiler, mirrors, spoked wheels.
 // detail 1 is traffic: same body and glass, fewer meshes.
-function buildCar(color, detailed) {
+function buildCar(color, detailed, opts) {
   var group = new THREE.Group();
   var body = new THREE.Group(); // leans on its suspension; wheels stay put
   group.add(body);
@@ -379,6 +439,13 @@ function buildCar(color, detailed) {
     : paint(color, 0.35, 0.6);
   var skirtMat = paint(base.clone().multiplyScalar(0.55).getHex(), 0.5, 0.4);
   var glass = glassMat();
+  // r11 B3: traffic glass is tinted but see-through, so the driver
+  // inside reads through it; the hero keeps opaque glass.
+  if (!detailed) {
+    glass.transparent = true;
+    glass.opacity = 0.45;
+    glass.depthWrite = false;
+  }
 
   // Main body, low skirt, sloped hood: a long low shape, not a box
   // with a box on top. r9 B1: the body is a rounded box (bevel
@@ -607,6 +674,16 @@ function buildCar(color, detailed) {
     }
   }
 
+  // r11 B3: the driver figure (traffic only — the hero is driven by
+  // the player). The hook hides/shows it: traffic3d hides it for
+  // parked cars and mopeds, main3d hides it when the player boards
+  // and shows it again when a jacked car is left behind.
+  var driver = null;
+  if (!detailed && (!opts || opts.driver !== false)) {
+    driver = buildDriver();
+    body.add(driver);
+  }
+
   var dent = null;
   if (detailed) {
     // A dark dent patch on the hood flank, invisible until damage.
@@ -696,6 +773,14 @@ function buildCar(color, detailed) {
     applyLampLevels();
   };
 
+  // r11-B3: driver visibility hook (see the driver block above).
+  // A no-op on the hero (no driver figure); traffic3d and main3d
+  // call it without guards.
+  group.userData.setDriverVisible = function (v) {
+    if (driver) driver.visible = !!v;
+  };
+  group.userData.hasDriver = function () { return !!driver; };
+
   applyLampLevels();
 
   if (detailed) {
@@ -720,13 +805,15 @@ export function createHeroCar() {
 // Traffic: same assembly, cheaper (no stripe, spoiler, mirrors
 // or spokes), in a street colour. Pass a colour, or one
 // is picked from the roster palette in turn so the street varies.
-export function createTrafficCar(color) {
+// opts.driver === false builds the car with no driver figure
+// (parked cars, mopeds — r11 B3).
+export function createTrafficCar(color, opts) {
   var c = color;
   if (!c) {
     c = TRAFFIC_PALETTE[paletteCursor % TRAFFIC_PALETTE.length];
     paletteCursor++;
   }
-  return buildCar(c, false);
+  return buildCar(c, false, opts);
 }
 
 // ---- the Gull ----------------------------------------------------
