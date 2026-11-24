@@ -231,9 +231,24 @@
     ];
   }
 
-  // Eight slots: the full weapon roster. The last slot is the locked
-  // rifle in the 2D bar's spirit — here every roster weapon shows,
-  // and a weapon the player does not own yet shows LOCKED.
+  // Weapon icons: one small inline SVG silhouette per roster weapon,
+  // drawn fresh here (weapons3d.js carries names only, no icons).
+  // fill="currentColor" so the slot CSS colours the icon: gold when
+  // owned, muted grey when locked.
+  var WEAPON_ICONS = {
+    fists: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="8" cy="11" r="5"/><circle cx="16" cy="13" r="5"/></svg>',
+    pistol: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 5h16v4H9v2H7v7H4v-7H2z"/></svg>',
+    smg: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M1 6h20v3H1zM6 9h3v6H6zM14 9h3v4h-3zM18 9h3v3h-3z"/></svg>',
+    shotgun: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M1 7h21v3H1zM8 10h3v5H8zM17 10h3v3h-3z"/></svg>',
+    carbine: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M1 7h21v3H1zM10 4h5v3h-5zM7 10h3v6H7zM17 10h3v4h-3z"/></svg>',
+    revolver: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M2 6h11v4H8v2H6v6H3v-6H2z"/><circle cx="16.5" cy="8" r="3.5"/></svg>',
+    bat: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M13 2l5 3-8 14-4-2z"/></svg>',
+    sniper: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M1 8h22v2H1zM9 5h6v3H9zM7 10h3v5H7zM18 10h3v3h-3z"/></svg>'
+  };
+
+  // Eight slots: the full weapon roster. Every roster weapon shows
+  // with its icon and name; a weapon the player does not own yet is
+  // dimmed and tagged LOCKED, never a bare LOCKED placeholder.
   function weaponSlots(state) {
     var defs = weaponDefs().slice(0, 8);
     var p = state.player;
@@ -244,7 +259,7 @@
       var reserve = (p.ammo && p.ammo[w.id + '_reserve'] !== undefined)
         ? p.ammo[w.id + '_reserve'] : w.reserve;
       return {
-        id: w.id, name: w.name, locked: locked,
+        id: w.id, name: w.name, locked: locked, icon: WEAPON_ICONS[w.id] || '',
         mag: mag, reserve: reserve, hasMag: w.mag > 0,
         current: p.weapon === w.id
       };
@@ -361,9 +376,11 @@
     for (var w = 0; w < 8; w++) {
       var slot = el('div', 'pv3d-panel pv3d-weapon-slot', dom.weapons);
       var nm = el('div', 'pv3d-weapon-name', slot);
+      var ic = el('span', 'pv3d-weapon-icon', nm);
+      var nt = el('span', 'pv3d-weapon-name-text', nm);
       var ammo = el('div', 'pv3d-weapon-ammo', slot);
       var key = el('div', 'pv3d-weapon-key', slot);
-      dom.weaponSlots.push({ slot: slot, name: nm, ammo: ammo, key: key });
+      dom.weaponSlots.push({ slot: slot, icon: ic, name: nt, ammo: ammo, key: key });
     }
 
     // Speedo, bottom-right.
@@ -672,9 +689,15 @@
       if (!slot) { slotDom.slot.style.display = 'none'; continue; }
       slotDom.slot.style.display = '';
       slotDom.slot.classList.toggle('pv3d-weapon-current', !!slot.current);
-      slotDom.name.textContent = slot.locked ? 'LOCKED' : slot.name.toUpperCase();
+      slotDom.slot.classList.toggle('pv3d-weapon-locked', !!slot.locked);
+      // Every slot shows its icon + name, locked or not; a locked
+      // slot is dimmed and tagged LOCKED in the key line, never a
+      // bare LOCKED placeholder.
+      slotDom.icon.innerHTML = slot.icon || '';
+      slotDom.name.textContent = slot.name.toUpperCase();
       if (slot.locked) {
         slotDom.ammo.textContent = '—';
+        slotDom.ammo.style.color = '#8a8a92';
       } else if (!slot.hasMag) {
         slotDom.ammo.textContent = '—';
       } else {
@@ -682,7 +705,7 @@
         slotDom.ammo.style.color = slot.mag === 0 ? '#e84a3a' : '#ffd166';
       }
       slotDom.key.textContent = (slot.current && p.aiming)
-        ? '◉ AIMING' : (slot.current ? 'EQUIPPED' : ('[' + (w + 1) + ']'));
+        ? '◉ AIMING' : (slot.current ? 'EQUIPPED' : (slot.locked ? 'LOCKED' : ('[' + (w + 1) + ']')));
     }
 
     // Speedo: hidden on foot.
@@ -715,11 +738,11 @@
       var wheelHtml = '';
       for (var k = 0; k < slots.length; k++) {
         var ws = slots[k];
-        var ammoTxt = ws.hasMag ? (ws.mag + ' / ' + ws.reserve) : '—';
-        wheelHtml += '<div class="pv3d-wheel-slot' + (ws.current ? ' pv3d-wheel-current' : '') + '">' +
-          '<div class="pv3d-wheel-name">' + (ws.locked ? 'LOCKED' : ws.name.toUpperCase()) + '</div>' +
+        var ammoTxt = ws.locked ? '—' : (ws.hasMag ? (ws.mag + ' / ' + ws.reserve) : '—');
+        wheelHtml += '<div class="pv3d-wheel-slot' + (ws.current ? ' pv3d-wheel-current' : '') + (ws.locked ? ' pv3d-wheel-locked' : '') + '">' +
+          '<div class="pv3d-wheel-name"><span class="pv3d-wheel-icon">' + (ws.icon || '') + '</span><span>' + ws.name.toUpperCase() + '</span></div>' +
           '<div class="pv3d-wheel-ammo">' + ammoTxt + '</div>' +
-          '<div class="pv3d-wheel-key">[' + (k + 1) + ']</div></div>';
+          '<div class="pv3d-wheel-key">' + (ws.locked ? 'LOCKED' : ('[' + (k + 1) + ']')) + '</div></div>';
       }
       dom.wheelGrid.innerHTML = wheelHtml;
     }
@@ -818,7 +841,13 @@
       '.pv3d-weapons{display:flex;gap:6px}',
       '.pv3d-weapon-slot{flex:1;padding:5px 6px}',
       '.pv3d-weapon-current{outline:2px solid #ffd166;background:rgba(8,12,18,0.78)}',
-      '.pv3d-weapon-name{font-size:10px;font-weight:700;white-space:nowrap;overflow:hidden}',
+      '.pv3d-weapon-name{display:flex;align-items:center;gap:4px;font-size:10px;font-weight:700;white-space:nowrap;overflow:hidden}',
+      '.pv3d-weapon-icon{flex:none;display:inline-flex;color:#ffd166}',
+      '.pv3d-weapon-icon svg{width:16px;height:14px}',
+      '.pv3d-weapon-name-text{overflow:hidden;text-overflow:ellipsis}',
+      '.pv3d-weapon-locked{opacity:0.65}',
+      '.pv3d-weapon-locked .pv3d-weapon-icon{color:#c9d2e0}',
+      '.pv3d-weapon-locked .pv3d-weapon-name-text{color:#c9d2e0}',
       '.pv3d-weapon-ammo{font-size:14px;font-weight:700;color:#ffd166;margin-top:3px}',
       '.pv3d-weapon-key{font-size:10px;color:#8a8a92;margin-top:3px}',
       '.pv3d-speedo{padding:6px 10px}',
@@ -829,7 +858,11 @@
       '.pv3d-wheel-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}',
       '.pv3d-wheel-slot{background:rgba(8,12,18,0.72);border:1px solid rgba(255,255,255,0.25);padding:8px}',
       '.pv3d-wheel-current{background:rgba(255,209,102,0.85);color:#222;border-color:#ffd166}',
-      '.pv3d-wheel-name{font-size:12px;font-weight:700}',
+      '.pv3d-wheel-name{display:flex;align-items:center;justify-content:center;gap:5px;font-size:12px;font-weight:700}',
+      '.pv3d-wheel-icon{display:inline-flex;color:#ffd166}',
+      '.pv3d-wheel-icon svg{width:16px;height:14px}',
+      '.pv3d-wheel-locked{opacity:0.65}',
+      '.pv3d-wheel-locked .pv3d-wheel-icon{color:#c9d2e0}',
       '.pv3d-wheel-ammo{font-size:12px;color:#ffd166;margin-top:2px}',
       '.pv3d-wheel-current .pv3d-wheel-ammo{color:#222}',
       '.pv3d-wheel-key{font-size:10px;color:#8a8a92;margin-top:2px}',

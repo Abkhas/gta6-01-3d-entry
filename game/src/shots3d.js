@@ -428,6 +428,20 @@
     p.money = 8930;
     p.weapon = 'pistol';
     p.ammo = { pistol: 7, pistol_reserve: 36 };
+    // NIGHT POLISH: Rey's hero car — the coral-red Cometa GT — parked
+    // at the avenue's east kerb 45 m ahead of him, between him and the
+    // rivals, so the frame holds both the shooter AND his car under
+    // the new night lighting. Placed straight off the road point (same
+    // avenue line, 45 m north) — NOT re-snapped through
+    // nearestRoadPoint, which would yank it back onto Rey's cross
+    // street. Parked, not player.vehicle: Rey fights on foot here,
+    // the car is set dressing, not a drive state.
+    state.cars.push({
+      x: road.x + 12, z: road.z - 45, angle: -Math.PI / 2, speed: 0,
+      damage: 0, condition: 100, driver: null,
+      model: { id: 'cometa', name: 'Cometa GT', color: '#ff4f3d', top: 176 },
+      parked: true
+    });
     // Three rivals ahead of Rey in a line ACROSS the street: one on
     // the avenue's west edge, one on the cross street east, the
     // downed one centre on the avenue. They stand on the road, clear

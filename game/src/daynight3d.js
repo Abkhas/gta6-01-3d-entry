@@ -107,6 +107,24 @@ export function createDayNight(sky, opts) {
   function computeGrade() {
     const blend = gradeBlend(sys.hour);
     const g = blendGrades(blend.from, blend.to, blend.t);
+    // NIGHT FLOOR (B1 night polish): the raw night grade is a near-black
+    // void (hemi 0.4, moonlight 0.55, sky #0a1230) — the hero, rivals,
+    // peds and stalls vanish. Never let the blended grade fall below a
+    // dark-but-readable night, scaled by nightness (g.stars: 0 by day,
+    // 1 at full night, in between across the dawn/dusk blends) so the
+    // other three grades are untouched and the cycle still blends.
+    const nightness = clamp(g.stars ?? 0, 0, 1);
+    if (nightness > 0) {
+      g.hemiIntensity = Math.max(g.hemiIntensity ?? 0, 0.95 * nightness);
+      g.sunIntensity = Math.max(g.sunIntensity ?? 0, 1.2 * nightness);
+      g.windowGlow = Math.max(g.windowGlow ?? 0, 1.0 * nightness);
+      g.neonGlow = Math.max(g.neonGlow ?? 0, 1.0 * nightness);
+      g.skyTop = lerpHex(g.skyTop, '#1b2f5c', 0.6 * nightness);
+      g.skyHorizon = lerpHex(g.skyHorizon, '#35548c', 0.6 * nightness);
+      g.fogColor = lerpHex(g.fogColor, '#27395f', 0.5 * nightness);
+      g.hemiSky = lerpHex(g.hemiSky, '#516f9f', 0.6 * nightness);
+      g.hemiGround = lerpHex(g.hemiGround, '#2c313c', 0.5 * nightness);
+    }
     const base = gradeForHour(sys.hour);
     sys.gradeName = base.label;
     sys.gradeKey = Object.keys(CFG.GRADES).find((k) => CFG.GRADES[k] === base) || 'morning';
@@ -161,7 +179,11 @@ export function createDayNight(sky, opts) {
       if (L.ambient) {
         if (L.ambient.color && typeof L.ambient.color.set === 'function') L.ambient.color.set(g.hemiSky);
         else if (L.ambient.color) L.ambient.color = g.hemiSky;
-        if (typeof L.ambient.intensity === 'number') L.ambient.intensity = g.hemiIntensity * 0.5;
+        // Night floor: the ambient share rises after dark (0.5 by day,
+        // 0.8 at full night) so the street never drops to black.
+        if (typeof L.ambient.intensity === 'number') {
+          L.ambient.intensity = g.hemiIntensity * (0.5 + 0.3 * clamp(g.stars ?? 0, 0, 1));
+        }
       }
     }
   }

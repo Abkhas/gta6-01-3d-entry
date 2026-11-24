@@ -15,8 +15,8 @@
 // the converted systems on window (PalmaMissions3d, PalmaCrew3d,
 // PalmaProgress3d, PalmaGarage3d) and turns their numbers into
 // panels. The systems screen stays a DOM/canvas overlay — it does
-// not need a 3D scene behind it, so the world keeps rendering
-// underneath, dimmed.
+// not need a 3D scene behind it: the overlay is fully opaque, so no
+// HUD text bleeds through any panel.
 
 (function () {
   'use strict';
@@ -292,7 +292,7 @@
     var shoreX = c3 ? c3.SHORE_X : b.x0 + 180;
     var sandX = c3 ? c3.BEACH_X : b.x0 + 300;
 
-    ctx.fillStyle = 'rgba(8,18,14,0.9)';
+    ctx.fillStyle = '#08120e';
     ctx.fillRect(0, 0, W, H);
     ctx.fillStyle = '#1f6f8f';
     ctx.fillRect(0, 0, Math.max(0, mx(shoreX)), H);
@@ -451,7 +451,7 @@
       ctx.font = 'bold 11px system-ui, sans-serif';
       var wtw = ctx.measureText(wLabel).width;
       var wtx = mx(state.waypoint.x), wty = mz(wz) - 32;
-      ctx.fillStyle = 'rgba(8,18,14,0.85)';
+      ctx.fillStyle = '#08120e';
       ctx.fillRect(wtx - wtw / 2 - 5, wty - 11, wtw + 10, 15);
       ctx.fillStyle = '#ffd166';
       ctx.textAlign = 'center';
@@ -847,14 +847,14 @@
   function injectCss() {
     if (document.getElementById('pv3d-screens-css')) return;
     var css = [
-      '.pv3d-systems{position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:8;background:rgba(6,10,16,0.82);display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;color:#e8e8e8}',
+      '.pv3d-systems{position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:8;background:#060a10;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;color:#e8e8e8}',
       '.pv3d-systems-stage{width:1280px;height:720px;position:relative}',
       '.pv3d-systems-header{display:flex;align-items:center;gap:16px;padding:0 24px;height:56px}',
       '.pv3d-systems-title{font-size:22px;font-weight:800;color:#ffd166;letter-spacing:2px}',
       '.pv3d-systems-tabs{display:flex;gap:6px}',
-      '.pv3d-tab{background:rgba(8,12,18,0.6);color:#e8e8e8;border:1px solid rgba(255,255,255,0.2);padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer}',
+      '.pv3d-tab{background:#080c12;color:#e8e8e8;border:1px solid rgba(255,255,255,0.2);padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer}',
       '.pv3d-tab-active{background:#ffd166;color:#222;border-color:#ffd166}',
-      '.pv3d-systems-close{margin-left:auto;background:rgba(8,12,18,0.6);color:#ffd166;border:1px solid #ffd166;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer}',
+      '.pv3d-systems-close{margin-left:auto;background:#080c12;color:#ffd166;border:1px solid #ffd166;padding:6px 12px;font-size:12px;font-weight:700;cursor:pointer}',
       '.pv3d-systems-cols{display:flex;gap:16px;padding:0 24px;height:520px}',
       '.pv3d-col{display:flex;flex-direction:column;gap:10px}',
       '.pv3d-col-left{width:300px}',
@@ -864,7 +864,9 @@
       // used to leak padding:10px 12px onto the HUD's panels (same
       // class, later stylesheet wins), adding 20px to every HUD panel
       // and pushing their text onto the panel below.
-      '.pv3d-systems .pv3d-panel,.pv3d-title .pv3d-panel{background:rgba(8,12,18,0.6);padding:10px 12px}',
+      // Every systems/title panel is fully solid: the old 0.6 alpha
+      // let HUD text ghost through the pause screen.
+      '.pv3d-systems .pv3d-panel,.pv3d-title .pv3d-panel{background:#080c12;padding:10px 12px}',
       '.pv3d-card-title{font-size:12px;font-weight:700;color:#ffd166;letter-spacing:1px;margin-bottom:8px}',
       '.pv3d-ring-card{display:flex;align-items:center;gap:14px;height:132px}',
       '.pv3d-ring{width:110px;height:110px;flex:none;transform:rotate(-90deg)}',
@@ -887,7 +889,7 @@
       '.pv3d-medals{display:flex;gap:6px}',
       '.pv3d-medal{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;color:#222}',
       '.pv3d-map-card{height:430px}',
-      '.pv3d-fullmap{display:block;background:rgba(8,18,14,0.9)}',
+      '.pv3d-fullmap{display:block;background:#08120e}',
       '.pv3d-map-foot{font-size:11px;color:#ffd166;margin-top:6px}',
       '.pv3d-missions-card{flex:1;overflow:hidden}',
       '.pv3d-mission-list{display:flex;flex-direction:column}',
@@ -906,7 +908,7 @@
       '.pv3d-stat-label{color:#c9d2e0}',
       '.pv3d-stat-value{color:#fff;font-weight:700}',
       '.pv3d-dash-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:10px}',
-      '.pv3d-dash-cell{background:rgba(255,255,255,0.05);padding:6px;text-align:center}',
+      '.pv3d-dash-cell{background:#141a22;padding:6px;text-align:center}',
       '.pv3d-dash-num{font-size:15px;font-weight:700;color:#ffd166}',
       '.pv3d-dash-label{font-size:9px;color:#8a8a92;margin-top:2px}',
       '.pv3d-slots-card{flex:1}',
@@ -918,8 +920,8 @@
       '.pv3d-band-crew-effect{font-size:11px;color:#e8e8e8;margin-top:2px}',
       '.pv3d-band-garage-list{font-size:12px;color:#fff}',
       '.pv3d-band-garage-sub{font-size:11px;color:#8a8a92;margin-top:6px}',
-      '.pv3d-slot{background:rgba(8,12,18,0.55);border:1px solid rgba(255,255,255,0.25);padding:8px 12px;margin-top:8px}',
-      '.pv3d-slot-selected{border:2px solid #ffd166;background:rgba(8,12,18,0.85)}',
+      '.pv3d-slot{background:#080c12;border:1px solid rgba(255,255,255,0.25);padding:8px 12px;margin-top:8px}',
+      '.pv3d-slot-selected{border:2px solid #ffd166;background:#080c12}',
       '.pv3d-slot-head{font-size:13px;font-weight:700;color:#ffd166}',
       '.pv3d-slot-title{font-size:14px;font-weight:700;color:#fff;margin-top:4px;white-space:nowrap;overflow:hidden}',
       '.pv3d-slot-line{font-size:13px;color:#ffd166;margin-top:4px}',
@@ -942,7 +944,13 @@
       '.pv3d-title-menu{position:absolute;left:40px;top:260px;width:320px;padding:12px 16px}',
       '.pv3d-title-menu-item{font-size:20px;font-weight:700;padding:10px 6px;color:#e8e8e8}',
       '.pv3d-title-menu-selected{color:#ffd166}',
-      '.pv3d-title-slots{position:absolute;right:48px;top:150px;width:452px}',
+      // Save slots moved left + down off the right edge: at right:48
+      // the sun disc (left 72%, top 44% -> x922-990, y317-385) sat
+      // squarely behind save slot 2 and glowed through its panel.
+      // Now x388-840: 81px clear of the disc, ~41px clear of its
+      // glow; 28px right of the menu, 14px below the tagline, ~18px
+      // above the footer. The sun itself is untouched.
+      '.pv3d-title-slots{position:absolute;right:440px;top:190px;width:452px}',
       '.pv3d-title-slots-head{font-size:15px;font-weight:700;color:#ffd166;margin-bottom:4px}',
       '.pv3d-title-slots .pv3d-slot{height:104px}',
       '.pv3d-title-foot{position:absolute;left:0;right:0;bottom:88px;text-align:center;font-size:17px;font-weight:700;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',

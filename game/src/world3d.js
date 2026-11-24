@@ -121,7 +121,7 @@ export function buildWorld(scene, CFG = CFG3D) {
   // ---- ground, beach, ocean -------------------------------------------
   const ground = new THREE.Mesh(
     new THREE.PlaneGeometry(HALF * 2 + 200, HALF * 2 + 200),
-    mat('#39402f'),
+    mat('#4c5541'),
   );
   ground.rotation.x = -Math.PI / 2;
   ground.position.set(0, -0.2, 0);
@@ -152,9 +152,12 @@ export function buildWorld(scene, CFG = CFG3D) {
   // ---- roads ------------------------------------------------------------
   // Ordinary streets run along every grid line except the two highway
   // lines; the highways get their own wider strips below.
-  const roadMat = mat('#23262b', { roughness: 0.95 });
-  const walkMat = mat('#5d6167', { roughness: 1 });
-  const hwMat = mat('#1d1f24', { roughness: 0.95 });
+  // B3 road polish: asphalt lifted out of near-black so it reads in the
+  // golden-hour chase, and the pavement is now clearly lighter than the
+  // road — the sidewalk strips double as the light curb edge.
+  const roadMat = mat('#4a4e56', { roughness: 0.95 });
+  const walkMat = mat('#9ba1a8', { roughness: 1 });
+  const hwMat = mat('#3d4048', { roughness: 0.95 });
 
   function roadStrip(x, z, w, d, material) {
     const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), material);
@@ -188,8 +191,9 @@ export function buildWorld(scene, CFG = CFG3D) {
   box(1, 1.2, HALF * 2, barrierMat, HW_E + HW_W / 2 + 1, 0.6, 0);
 
   // Lane dashes, instanced: one thin white box per dash, both directions.
-  const dashGeo = new THREE.BoxGeometry(4, 0.06, 0.5);
-  const dashMat = new THREE.MeshBasicMaterial({ color: '#c8cdd2' });
+  // B3: near-white and longer so the centre lines read at chase distance.
+  const dashGeo = new THREE.BoxGeometry(6, 0.06, 0.5);
+  const dashMat = new THREE.MeshBasicMaterial({ color: '#f5f8fa' });
   const dashSpots = [];
   for (const c of roadCentres) {
     if (c === HW_N || c === HW_E) continue;
@@ -522,7 +526,9 @@ export function buildWorld(scene, CFG = CFG3D) {
   // Neon signs: glowing strips on shopfronts in Citrus Lane + Boardwalk.
   // Each sign hangs on a building face; its material brightens at night.
   {
-    const neonColors = ['#ff5c8a', '#2ad8ff', '#ffe14d', '#4dff88', '#c07aff'];
+    // B3: seven varied neon hues (was five) so the night city is not
+    // one-colour, and a much higher base glow so signs read before night.
+    const neonColors = ['#ff5c8a', '#2ad8ff', '#ffe14d', '#4dff88', '#c07aff', '#ff9f1c', '#00e5c0'];
     let placed = 0;
     for (const b of buildings) {
       if (placed >= 26) break;
@@ -530,7 +536,7 @@ export function buildWorld(scene, CFG = CFG3D) {
       if (rng() < 0.55) continue;
       const color = neonColors[Math.floor(rng() * neonColors.length)];
       const nm = new THREE.MeshStandardMaterial({
-        color: '#111111', emissive: new THREE.Color(color), emissiveIntensity: 0.35,
+        color: '#111111', emissive: new THREE.Color(color), emissiveIntensity: 0.9,
       });
       neonMats.push(nm);
       const sign = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(b.w * 0.6, 18), 2.2), nm);
@@ -583,10 +589,11 @@ export function buildWorld(scene, CFG = CFG3D) {
   // ---- traffic lights + lamps ----------------------------------------------
   const poleMat = new THREE.MeshStandardMaterial({ color: '#3a3f45', roughness: 0.6, metalness: 0.5 });
   const lampHeadMat = new THREE.MeshStandardMaterial({
-    color: '#fff2c8', emissive: new THREE.Color('#ffe9a8'), emissiveIntensity: 0.1,
+    color: '#fff2c8', emissive: new THREE.Color('#ffe9a8'), emissiveIntensity: 0.6,
   });
   const lampPoles = [];
   const lampHeads = [];
+  const lampSpots = []; // [x, z] of every street lamp — light-pool sites
   for (const cx of roadCentres) {
     for (const cz of roadCentres) {
       if (cx === HW_E || cz === HW_N) continue;
@@ -618,9 +625,38 @@ export function buildWorld(scene, CFG = CFG3D) {
         group.add(bulb);
         lampPoles.push(pole);
         lampHeads.push(bulb);
+        lampSpots.push([px, pz]);
       }
     }
   }
+
+  // B3: a warm pool of light on the asphalt under every street lamp.
+  // One instanced radial-gradient disc per lamp (additive, no shadow,
+  // no collider) — its opacity is driven by setLampGlow below, so the
+  // pools strengthen as the grade goes to night.
+  const poolTex = canvasTexture(128, 128, (g, w, h) => {
+    const grad = g.createRadialGradient(w / 2, h / 2, 4, w / 2, h / 2, w / 2);
+    grad.addColorStop(0, 'rgba(255,255,255,0.95)');
+    grad.addColorStop(0.45, 'rgba(255,255,255,0.38)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, h);
+  });
+  const poolMat = new THREE.MeshBasicMaterial({
+    map: poolTex, color: '#ffca7a', transparent: true, opacity: 0.32,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const poolGeo = new THREE.CircleGeometry(9, 24);
+  const pools = new THREE.InstancedMesh(poolGeo, poolMat, lampSpots.length);
+  lampSpots.forEach(([x, z], i) => {
+    dummy.position.set(x, 0.05, z);
+    dummy.rotation.set(-Math.PI / 2, 0, 0);
+    dummy.updateMatrix();
+    pools.setMatrixAt(i, dummy.matrix);
+  });
+  pools.instanceMatrix.needsUpdate = true;
+  pools.renderOrder = 1;
+  group.add(pools);
 
   // ---- queries + animation hooks -------------------------------------------
   function isSolid(x, z) {
@@ -667,10 +703,16 @@ export function buildWorld(scene, CFG = CFG3D) {
     for (const m of facadeMats) m.emissiveIntensity = 0.1 + v * 1.4;
   }
   function setLampGlow(v) {
-    lampHeadMat.emissiveIntensity = 0.1 + v * 1.6;
+    // B3: bulbs 0.5 + 3.0v (was 0.1 + 1.6v) — clearly lit at the
+    // golden-hour chase (v=0.5) and strong at night (v=1); the light
+    // pools on the asphalt scale with the same grade value.
+    lampHeadMat.emissiveIntensity = 0.5 + v * 3.0;
+    poolMat.opacity = 0.10 + v * 0.45;
   }
   function setNeonGlow(v) {
-    for (const m of neonMats) m.emissiveIntensity = 0.3 + v * 1.8;
+    // B3: 0.9 + 3.4v (was 0.3 + 1.8v) — neon reads at night (v=1 → 4.3)
+    // and stays visible in the golden hour (v=0.5 → 2.6).
+    for (const m of neonMats) m.emissiveIntensity = 0.9 + v * 3.4;
   }
 
   return {

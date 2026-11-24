@@ -85,30 +85,36 @@ var paletteCursor = 0;
 
 var WHEEL_R = 0.36;
 var WHEEL_X = 1.45; // axle offset from centre, front and rear
-var WHEEL_Z = 0.92; // axle offset from centre, left and right
+var WHEEL_Z = 1.0; // axle offset from centre, left and right — pushed
+// out so the tyres stand proud of the 2.0 m body and read from the
+// chase camera behind, instead of hiding inside the bodywork.
 
 function makeWheel(detailed) {
   // A wrapper group at the axle: the inner spinner turns around the
   // axle (local z after the tyre is laid flat) so the spin reads.
   var wrapper = new THREE.Group();
   var spinner = new THREE.Group();
+  // Hero tyres are wider (0.36) so they read from behind; traffic
+  // keeps the narrower 0.28.
+  var tyreW = detailed ? 0.36 : 0.28;
   var tyre = new THREE.Mesh(
-    new THREE.CylinderGeometry(WHEEL_R, WHEEL_R, 0.28, 20),
+    new THREE.CylinderGeometry(WHEEL_R, WHEEL_R, tyreW, 20),
     darkMat()
   );
   tyre.rotation.x = Math.PI / 2;
   spinner.add(tyre);
   var hub = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.2, 0.2, 0.3, 12),
+    new THREE.CylinderGeometry(0.22, 0.22, tyreW + 0.04, 12),
     paint(0xd8d8d8, 0.35, 0.8)
   );
   hub.rotation.x = Math.PI / 2;
   spinner.add(hub);
   if (detailed) {
-    // Three spokes so the spin is visible, not just a grey disc.
-    for (var i = 0; i < 3; i++) {
-      var spoke = box(0.34, 0.06, 0.31, paint(0x8a8a92, 0.4, 0.7), 0, 0, 0);
-      spoke.rotation.z = (i / 3) * Math.PI;
+    // Five full-length spokes so the spin is visible, not just a
+    // grey disc, and the wheel reads as a wheel from the rear.
+    for (var i = 0; i < 5; i++) {
+      var spoke = box(0.62, 0.07, tyreW + 0.02, paint(0x8a8a92, 0.4, 0.7), 0, 0, 0);
+      spoke.rotation.z = (i / 5) * Math.PI;
       spinner.add(spoke);
     }
   }
@@ -148,16 +154,60 @@ function buildCar(color, detailed) {
       color: 0xffffff, transparent: true, opacity: 0.3
     }), 1.02, 1.08, 0);
   body.add(streak);
+  // Rear window: a distinct dark glass panel set into the back face
+  // of the glasshouse, so the rear reads as glass, not painted body.
+  body.add(box(0.05, 0.42, 1.5, glass, -1.31, 1.08, 0));
+  // Side glass: proud dark panels on both flanks of the glasshouse,
+  // split front/rear by a body-colour B-pillar strip, with a
+  // beltline under them.
+  for (var sg = -1; sg <= 1; sg += 2) {
+    body.add(box(2.0, 0.38, 0.04, glass, -0.15, 1.08, 0.87 * sg));
+    body.add(box(0.06, 0.38, 0.05, bodyMat, -0.15, 1.08, 0.87 * sg));
+    body.add(box(2.3, 0.05, 0.02, darkMat(), -0.15, 0.84, 0.87 * sg));
+    // Panel lines: a side character line, door shut lines, and
+    // door handles, so the flanks read as panelled bodywork.
+    body.add(box(3.8, 0.03, 0.02, darkMat(), 0, 0.70, 1.005 * sg));
+    body.add(box(0.03, 0.5, 0.02, darkMat(), 0.55, 0.55, 1.005 * sg));
+    body.add(box(0.03, 0.5, 0.02, darkMat(), -0.85, 0.55, 1.005 * sg));
+    body.add(box(0.22, 0.05, 0.04, darkMat(), 0.35, 0.78, 1.01 * sg));
+    body.add(box(0.22, 0.05, 0.04, darkMat(), -0.55, 0.78, 1.01 * sg));
+  }
+  // Trunk shut line across the deck.
+  body.add(box(0.03, 0.02, 1.7, darkMat(), -1.95, 0.84, 0));
   // Grille, bumpers, lamps.
   body.add(box(0.04, 0.18, 1.1, darkMat(), 2.31, 0.45, 0));
+  body.add(box(0.04, 0.05, 1.1,
+    paint(0xc0c0c0, 0.3, 0.9), 2.33, 0.45, 0));
   body.add(box(0.12, 0.16, 2.02, darkMat(), 2.32, 0.30, 0));
   body.add(box(0.12, 0.16, 2.02, darkMat(), -2.32, 0.30, 0));
   var headMat = lampMat(0xfff2b0);
   var tailMat = lampMat(0xff2e2e);
-  body.add(box(0.06, 0.14, 0.34, headMat, 2.31, 0.62, 0.62));
-  body.add(box(0.06, 0.14, 0.34, headMat, 2.31, 0.62, -0.62));
-  body.add(box(0.06, 0.12, 0.30, tailMat, -2.31, 0.62, 0.62));
-  body.add(box(0.06, 0.12, 0.30, tailMat, -2.31, 0.62, -0.62));
+  tailMat.emissiveIntensity = 1.5; // taillights glow from behind
+  body.add(box(0.06, 0.18, 0.40, headMat, 2.31, 0.62, 0.62));
+  body.add(box(0.06, 0.18, 0.40, headMat, 2.31, 0.62, -0.62));
+  body.add(box(0.06, 0.16, 0.42, tailMat, -2.31, 0.62, 0.62));
+  body.add(box(0.06, 0.16, 0.42, tailMat, -2.31, 0.62, -0.62));
+  // Full-width rear light bar joining the taillights.
+  body.add(box(0.05, 0.10, 1.5, tailMat, -2.32, 0.62, 0));
+  // Rear diffuser valance with fins, twin chrome exhausts, and a
+  // licence plate — the whole rear face, not a flat red slab.
+  body.add(box(0.10, 0.14, 1.7, darkMat(), -2.30, 0.20, 0));
+  for (var df = -1; df <= 1; df++) {
+    body.add(box(0.10, 0.12, 0.04, darkMat(), -2.36, 0.20, 0.3 * df));
+  }
+  for (var ex = -1; ex <= 1; ex += 2) {
+    var pipe = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.06, 0.06, 0.18, 10),
+      paint(0xc0c0c0, 0.3, 0.9)
+    );
+    pipe.rotation.z = Math.PI / 2;
+    pipe.position.set(-2.34, 0.16, 0.55 * ex);
+    body.add(pipe);
+  }
+  body.add(box(0.03, 0.18, 0.55,
+    new THREE.MeshStandardMaterial({
+      color: 0xe8e8e8, roughness: 0.5, metalness: 0.1
+    }), -2.32, 0.45, 0));
 
   var cones = [];
   if (detailed) {
@@ -168,10 +218,19 @@ function buildCar(color, detailed) {
     body.add(box(1.6, 0.02, 0.5, stripeMat, 1.5, 0.86, 0));
     body.add(box(2.3, 0.02, 0.5, stripeMat, -0.15, 1.41, 0));
     body.add(box(0.9, 0.02, 0.5, stripeMat, -1.85, 0.84, 0));
-    // Rear spoiler on two posts.
+    // Rear spoiler on two posts, with a centre third brake light
+    // facing the chase camera.
     body.add(box(0.08, 0.18, 0.08, skirtMat, -2.15, 0.92, 0.6));
     body.add(box(0.08, 0.18, 0.08, skirtMat, -2.15, 0.92, -0.6));
     body.add(box(0.5, 0.06, 1.9, skirtMat, -2.18, 1.03, 0));
+    body.add(box(0.06, 0.05, 0.5, tailMat, -2.44, 1.04, 0));
+    // Wheel-arch eyebrows over each wheel, so the arches read
+    // from the side and the rear three-quarter.
+    for (var fa = -1; fa <= 1; fa += 2) {
+      for (var fb = -1; fb <= 1; fb += 2) {
+        body.add(box(1.0, 0.08, 0.06, skirtMat, WHEEL_X * fa, 0.82, 1.02 * fb));
+      }
+    }
     // Side mirrors.
     body.add(box(0.12, 0.10, 0.16, bodyMat, 0.75, 1.0, 1.0));
     body.add(box(0.12, 0.10, 0.16, bodyMat, 0.75, 1.0, -1.0));
@@ -301,34 +360,54 @@ export function createHeli() {
   var goldDark = paint(0xd9a83c, 0.5, 0.5);
   var glass = glassMat();
 
-  // Main cabin: a smooth scaled sphere, not a box — the Gull reads
-  // round and friendly from every angle.
-  var cabin = new THREE.Mesh(new THREE.SphereGeometry(1.0, 24, 18), gold);
-  cabin.scale.set(1.9, 1.05, 1.25);
-  cabin.position.set(0, 1.35, 0);
-  airframe.add(cabin);
-  // Cockpit bubble, forward and proud of the nose.
-  var bubble = new THREE.Mesh(new THREE.SphereGeometry(0.62, 16, 12), glass);
-  bubble.scale.set(1.0, 0.8, 1.1);
-  bubble.position.set(1.35, 1.45, 0);
-  airframe.add(bubble);
+  // Main cabin: a proper helicopter fuselage — a flat-sided box
+  // with a flat belly, NOT a sphere — so the Gull reads as a heli
+  // from every angle instead of a gold ball.
+  airframe.add(box(2.8, 1.35, 1.9, gold, -0.2, 1.35, 0));
+  // Sloped nose tapering down-forward, with dark cockpit glass
+  // proud of it and a glare streak.
+  var nose = box(1.0, 1.0, 1.7, gold, 1.45, 1.15, 0);
+  nose.rotation.z = -0.38;
+  airframe.add(nose);
+  var cockpit = box(0.85, 0.75, 1.75, glass, 1.5, 1.5, 0);
+  cockpit.rotation.z = -0.38;
+  airframe.add(cockpit);
+  var glare = box(0.04, 0.4, 0.5,
+    new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0.25
+    }), 1.88, 1.6, 0);
+  glare.rotation.z = -0.38;
+  airframe.add(glare);
+  // Side windows and door shut lines on both flanks.
+  for (var sw = -1; sw <= 1; sw += 2) {
+    airframe.add(box(1.3, 0.55, 0.04, glass, -0.35, 1.55, 0.96 * sw));
+    airframe.add(box(0.7, 0.5, 0.04, glass, -1.15, 1.5, 0.96 * sw));
+    airframe.add(box(0.03, 1.0, 0.02, darkMat(), 0.35, 1.3, 0.96 * sw));
+    airframe.add(box(0.03, 1.0, 0.02, darkMat(), -0.95, 1.3, 0.96 * sw));
+  }
+  // Engine deck hump under the mast, and a flat belly plate.
+  airframe.add(box(1.5, 0.35, 1.2, goldDark, -0.1, 2.15, 0));
+  airframe.add(box(2.4, 0.1, 1.7, goldDark, -0.2, 0.66, 0));
   // Belly stripe.
   airframe.add(box(2.6, 0.14, 2.3, goldDark, -0.1, 0.62, 0));
 
-  // Tail boom, tapering to the fin, with a stabiliser and tail rotor.
+  // Tail boom, tapering to the fin, with a stabiliser and tail
+  // rotor. The tail is at -x (rear): nose-forward is +x, so the
+  // boom runs backwards from the cabin, not forwards through the
+  // cockpit as it did before.
   var boom = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.14, 0.30, 3.4, 10), gold);
-  boom.rotation.z = -Math.PI / 2;
-  boom.position.set(2.9, 1.6, 0);
+    new THREE.CylinderGeometry(0.34, 0.18, 3.4, 10), gold);
+  boom.rotation.z = -Math.PI / 2; // top radius (0.34) lands at +x,
+  // the cabin end; the tail tip tapers to 0.18.
+  boom.position.set(-2.9, 1.6, 0);
   airframe.add(boom);
-  airframe.add(box(0.08, 1.1, 0.5, gold, 4.5, 1.9, 0));
-  airframe.add(box(0.5, 0.06, 1.4, goldDark, 4.3, 1.5, 0));
+  airframe.add(box(0.08, 1.5, 0.7, gold, -4.55, 2.0, 0));
+  airframe.add(box(0.5, 0.06, 1.6, goldDark, -4.3, 1.5, 0));
   var tailRotor = new THREE.Group();
-  tailRotor.position.set(4.55, 1.75, 0.3);
+  tailRotor.position.set(-4.6, 1.75, 0.35);
   var tailBlade = box(0.04, 0.9, 0.08, darkMat(), 0, 0, 0);
   tailRotor.add(tailBlade);
-  var tailBlade2 = box(0.04, 0.9, 0.08, darkMat(), 0, 0, 0);
-  tailBlade2.rotation.z = Math.PI / 2;
+  var tailBlade2 = box(0.04, 0.08, 0.9, darkMat(), 0, 0, 0);
   tailRotor.add(tailBlade2);
   airframe.add(tailRotor);
 
@@ -361,9 +440,9 @@ export function createHeli() {
 
   // Skids on four short struts.
   for (var s = -1; s <= 1; s += 2) {
-    airframe.add(box(2.6, 0.07, 0.07, darkMat(), 0, 0.25, 0.85 * s));
-    airframe.add(box(0.07, 0.6, 0.07, darkMat(), 0.7, 0.55, 0.85 * s));
-    airframe.add(box(0.07, 0.6, 0.07, darkMat(), -0.7, 0.55, 0.85 * s));
+    airframe.add(box(3.0, 0.07, 0.07, darkMat(), 0, 0.25, 0.85 * s));
+    airframe.add(box(0.07, 0.6, 0.07, darkMat(), 0.9, 0.55, 0.85 * s));
+    airframe.add(box(0.07, 0.6, 0.07, darkMat(), -0.9, 0.55, 0.85 * s));
   }
 
   // Nav lights: red port, green starboard, white tail.
@@ -377,7 +456,7 @@ export function createHeli() {
   airframe.add(navG);
   var navW = new THREE.Mesh(
     new THREE.SphereGeometry(0.06, 8, 8), lampMat(0xffffff));
-  navW.position.set(4.6, 1.6, 0);
+  navW.position.set(-4.6, 1.6, 0);
   airframe.add(navW);
 
   // Spotlight cone, apex at the nose, pooling forward-down.
@@ -410,7 +489,8 @@ export function createHeli() {
     var step = Math.max(0, Math.min(dt, 0.1));
     var rs = rotorSpeed || 0;
     rotor.rotation.y += rs * step;
-    tailRotor.rotation.z += rs * 1.6 * step;
+    tailRotor.rotation.x += rs * 1.6 * step; // tail disc is in the
+    // YZ plane, so it spins around the boom (x) axis.
     // The blur disc thickens with rotor speed.
     disc.material.opacity = Math.max(0.06,
       Math.min(0.22, 0.06 + rs * 0.008));

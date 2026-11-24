@@ -38,6 +38,25 @@ function glowTexture() {
   return tex;
 }
 
+// Round star sprite: WebGL points are squares by default, so a bare
+// PointsMaterial renders every star as a white square. A radial disc
+// texture with a transparent falloff makes each point a small round
+// dot instead (corners fade to fully transparent).
+function starTexture() {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 64;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(32, 32, 1, 32, 32, 30);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.4, 'rgba(255,255,255,0.9)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
 export function createSky(scene) {
   const sky = {};
 
@@ -106,7 +125,8 @@ export function createSky(scene) {
   const starGeo = new THREE.BufferGeometry();
   starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
   const starMat = new THREE.PointsMaterial({
-    color: '#dfe8ff', size: 14, sizeAttenuation: false,
+    color: '#dfe8ff', size: 9, sizeAttenuation: false,
+    map: starTexture(), alphaTest: 0.01,
     transparent: true, opacity: 0, fog: false, depthWrite: false,
   });
   const stars = new THREE.Points(starGeo, starMat);
@@ -183,40 +203,62 @@ export function setTimeOfDay(scene, grade, world = null) {
   const g = typeof grade === 'string' ? CFG3D.GRADES[grade] : grade;
   if (!g) throw new Error('setTimeOfDay: unknown grade ' + String(grade));
 
-  sky.domeMat.uniforms.topColor.value.set(g.skyTop);
-  sky.domeMat.uniforms.horizonColor.value.set(g.skyHorizon);
+  // NIGHT FLOOR (B1 night polish): the raw night grade renders as a
+  // ~90% black void (hemi 0.4, moonlight 0.55, sky #0a1230). Lift it to
+  // a dark-but-readable neon night, scaled by nightness (g.stars: 0 by
+  // day, 1 at full night) so day grades are untouched. `g` may be the
+  // shared CFG3D.GRADES entry, so floor a copy — never mutate config.
+  const nightness = Math.min(1, Math.max(0, g.stars ?? 0));
+  const fg = { ...g };
+  if (nightness > 0) {
+    fg.hemiIntensity = Math.max(g.hemiIntensity ?? 0, 0.95 * nightness);
+    fg.sunIntensity = Math.max(g.sunIntensity ?? 0, 1.2 * nightness);
+    fg.windowGlow = Math.max(g.windowGlow ?? 0, 1.0 * nightness);
+    fg.neonGlow = Math.max(g.neonGlow ?? 0, 1.0 * nightness);
+    fg.skyTop = '#' + lerpColor(g.skyTop, '#1b2f5c', 0.6 * nightness).getHexString();
+    fg.skyHorizon = '#' + lerpColor(g.skyHorizon, '#35548c', 0.6 * nightness).getHexString();
+    fg.fogColor = '#' + lerpColor(g.fogColor, '#27395f', 0.5 * nightness).getHexString();
+    fg.hemiSky = '#' + lerpColor(g.hemiSky, '#516f9f', 0.6 * nightness).getHexString();
+    fg.hemiGround = '#' + lerpColor(g.hemiGround, '#2c313c', 0.5 * nightness).getHexString();
+  }
 
-  placeBody(sky.sun, g.sunElevation, g.sunAzimuth);
+  sky.domeMat.uniforms.topColor.value.set(fg.skyTop);
+  sky.domeMat.uniforms.horizonColor.value.set(fg.skyHorizon);
+
+  placeBody(sky.sun, fg.sunElevation, fg.sunAzimuth);
   sky.sunGlow.position.copy(sky.sun.position);
-  sky.sunMat.color.set(g.sunColor);
-  sky.sun.visible = g.sunElevation > 0;
-  sky.sunGlow.material.opacity = g.sunElevation > 0 ? 0.85 : 0;
-  // The moon hangs opposite the sun: up at night, down by day.
-  placeBody(sky.moon, 90 - g.sunElevation, (g.sunAzimuth + 180) % 360);
-  sky.moon.visible = g.stars > 0;
-  sky.starMat.opacity = g.stars * 0.9;
+  sky.sunMat.color.set(fg.sunColor);
+  sky.sun.visible = fg.sunElevation > 0;
+  sky.sunGlow.material.opacity = fg.sunElevation > 0 ? 0.85 : 0;
+  // The moon hangs HIGH and to the EAST SIDE (elevation 68, azimuth
+  // 70), not mirrored off the sun: the old mirror put it low enough
+  // to sit on the title screen's save slots, which live lower-center.
+  // High + sideways keeps it clear of the menu area in any frame.
+  placeBody(sky.moon, 68, 70);
+  sky.moon.visible = fg.stars > 0;
+  sky.starMat.opacity = fg.stars * 0.9;
 
-  sky.sunLight.color.set(g.sunColor);
-  sky.sunLight.intensity = g.sunIntensity;
+  sky.sunLight.color.set(fg.sunColor);
+  sky.sunLight.intensity = fg.sunIntensity;
   sky.sunLight.position.copy(sky.sun.position).multiplyScalar(0.9);
   sky.sunLight.position.y = Math.max(sky.sunLight.position.y, 400);
-  sky.hemi.color.set(g.hemiSky);
-  sky.hemi.groundColor.set(g.hemiGround);
-  sky.hemi.intensity = g.hemiIntensity;
+  sky.hemi.color.set(fg.hemiSky);
+  sky.hemi.groundColor.set(fg.hemiGround);
+  sky.hemi.intensity = fg.hemiIntensity;
 
-  scene.fog = new THREE.Fog(g.fogColor, g.fogNear, g.fogFar);
+  scene.fog = new THREE.Fog(fg.fogColor, fg.fogNear, fg.fogFar);
   scene.background = null; // the dome is the background
 
-  for (const c of sky.clouds) c.material.color.set(g.cloudTint);
-  sky.clouds.forEach((c) => { c.material.opacity = g.stars > 0 ? 0.3 : 0.85; });
+  for (const c of sky.clouds) c.material.color.set(fg.cloudTint);
+  sky.clouds.forEach((c) => { c.material.opacity = fg.stars > 0 ? 0.3 : 0.85; });
 
   if (world) {
-    world.setWindowGlow(g.windowGlow);
-    world.setLampGlow(g.neonGlow);
-    if (world.setNeonGlow) world.setNeonGlow(g.neonGlow);
+    world.setWindowGlow(fg.windowGlow);
+    world.setLampGlow(fg.neonGlow);
+    if (world.setNeonGlow) world.setNeonGlow(fg.neonGlow);
   }
-  sky.grade = g;
-  return g;
+  sky.grade = fg;
+  return fg;
 }
 
 // Per-frame sky motion: clouds drift with the wind, the wheel of the pier
