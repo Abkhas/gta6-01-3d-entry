@@ -32,29 +32,74 @@ function canvasTexture(w, h, painter) {
 
 // A building face: wall colour with a grid of windows. `litShare` is the
 // share of windows that glow warm at night; the emissive canvas holds only
-// those lit windows, so the glow can be dialled by time of day.
-function facadeTextures(wall, trim, litShare, rng) {
+// those lit windows, so the glow can be dialled by time of day. `type`
+// picks the facade family: 'brick' (mortar courses + lintels), 'glass'
+// (curtain wall: big panes, thin mullions) or 'concrete' (floor shadow
+// bands, small punched windows). Each lit window takes its own warm
+// colour, so night facades are varied instead of one flat amber.
+const LIT_WINDOW_COLORS = ['#ffd98a', '#ffb45c', '#ff9a4d', '#ffe9b0', '#ff8a5c'];
+// `rngB` is the B4 stream: every new random pick (lit colours, brick
+// patches, glass pane tones) draws from it, so the main stream — and
+// therefore the building layout — is unchanged.
+function facadeTextures(wall, trim, litShare, rng, type, rngB) {
   const cols = 5 + Math.floor(rng() * 3);
   const rows = 9 + Math.floor(rng() * 6);
   const wins = [];
   for (let r = 0; r < rows; r++) {
-    for (let c = 0; c < cols; c++) wins.push([c, r, rng() < litShare]);
+    for (let c = 0; c < cols; c++) {
+      wins.push([c, r, rng() < litShare, LIT_WINDOW_COLORS[Math.floor(rngB() * LIT_WINDOW_COLORS.length)]]);
+    }
   }
   const map = canvasTexture(128, 256, (g, w, h) => {
     g.fillStyle = wall; g.fillRect(0, 0, w, h);
-    g.fillStyle = trim; g.fillRect(0, 0, w, 6); g.fillRect(0, h - 6, w, 6);
     const cw = w / cols, rh = h / rows;
-    for (const [c, r, lit] of wins) {
-      g.fillStyle = lit ? '#ffd98a' : '#2c3a4a';
+    if (type === 'brick') {
+      // Mortar courses + a few darker/lighter bricks so the wall is not flat.
+      g.fillStyle = 'rgba(0,0,0,0.18)';
+      for (let y = 0; y < h; y += 10) g.fillRect(0, y, w, 1);
+      for (let i = 0; i < 40; i++) {
+        g.fillStyle = rngB() < 0.5 ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.06)';
+        g.fillRect(Math.floor(rngB() * 16) * 8, Math.floor(rngB() * 25) * 10, 8, 10);
+      }
+    } else if (type === 'glass') {
+      // Curtain wall: the face is mostly glass; thin metal mullions grid it.
+      g.fillStyle = '#22374e'; g.fillRect(0, 0, w, h);
+      for (const [c, r] of wins) {
+        g.fillStyle = rngB() < 0.5 ? '#33506e' : '#2a4258';
+        g.fillRect(c * cw + 1, r * rh + 1, cw - 2, rh - 2);
+      }
+      g.fillStyle = '#9fb4c8';
+      for (let c = 0; c <= cols; c++) g.fillRect(c * cw - 1, 0, 2, h);
+      for (let r = 0; r <= rows; r++) g.fillRect(0, r * rh - 1, w, 2);
+    } else {
+      // Concrete: a shadow band at every floor line, small windows.
+      g.fillStyle = 'rgba(0,0,0,0.16)';
+      for (let r = 0; r <= rows; r++) g.fillRect(0, r * rh, w, 3);
+    }
+    g.fillStyle = trim; g.fillRect(0, 0, w, 6); g.fillRect(0, h - 6, w, 6);
+    for (const [c, r, lit, litColor] of wins) {
+      if (type === 'glass') {
+        if (lit) {
+          g.fillStyle = litColor;
+          g.fillRect(c * cw + 2, r * rh + 2, cw - 4, rh - 4);
+        }
+        continue;
+      }
+      if (type === 'brick') {
+        // Stone lintel above each window.
+        g.fillStyle = trim;
+        g.fillRect(c * cw + cw * 0.15, r * rh + rh * 0.12, cw * 0.7, 2);
+      }
+      g.fillStyle = lit ? litColor : '#2c3a4a';
       g.fillRect(c * cw + cw * 0.2, r * rh + rh * 0.22, cw * 0.6, rh * 0.56);
     }
   });
   const emissive = canvasTexture(128, 256, (g, w, h) => {
     g.fillStyle = '#000000'; g.fillRect(0, 0, w, h);
     const cw = w / cols, rh = h / rows;
-    for (const [c, r, lit] of wins) {
+    for (const [c, r, lit, litColor] of wins) {
       if (!lit) continue;
-      g.fillStyle = '#ffbe5c';
+      g.fillStyle = litColor;
       g.fillRect(c * cw + cw * 0.2, r * rh + rh * 0.22, cw * 0.6, rh * 0.56);
     }
   });
@@ -86,6 +131,11 @@ function plankTexture() {
 
 export function buildWorld(scene, CFG = CFG3D) {
   const rng = mulberry32(20261124);
+  // B4: a second deterministic stream for every B4 addition (facade
+  // types, height variation, rooftop props, storefronts, blade signs).
+  // The main stream is untouched, so the building layout, footprints and
+  // colliders stay byte-identical to the r5 city.
+  const rngB4 = mulberry32(20261124 ^ 0xb400);
   const group = new THREE.Group();
   group.name = 'PalmaVerdeWorld';
   scene.add(group);
@@ -184,6 +234,14 @@ export function buildWorld(scene, CFG = CFG3D) {
   // Highways: wider, fenced, no cross streets.
   roadStrip(0, HW_N, HALF * 2, HW_W, hwMat);
   roadStrip(HW_E, 0, HW_W, HALF * 2, hwMat);
+  // B4: the beach road — the chase runs NORTH up it (x = BEACH_X - 30),
+  // but it was bare ground with no asphalt and no lane markings, so the
+  // chase shot read as driving on grass. Give it a real strip, kerbs and
+  // centre dashes (added to dashSpots below).
+  const BEACH_ROAD_X = CFG.BEACH_X - 30;
+  roadStrip(BEACH_ROAD_X, 0, ROAD_W, HALF * 2, roadMat);
+  roadStrip(BEACH_ROAD_X - ROAD_W / 2 - 2, 0, 4, HALF * 2, walkMat);
+  roadStrip(BEACH_ROAD_X + ROAD_W / 2 + 2, 0, 4, HALF * 2, walkMat);
   const barrierMat = mat('#8a8f94', { roughness: 0.8 });
   box(HALF * 2, 1.2, 1, barrierMat, 0, 0.6, HW_N - HW_W / 2 - 1);
   box(HALF * 2, 1.2, 1, barrierMat, 0, 0.6, HW_N + HW_W / 2 + 1);
@@ -203,6 +261,11 @@ export function buildWorld(scene, CFG = CFG3D) {
       dashSpots.push([c, 0.03, t, 1]);       // along north-south street
     }
   }
+  // B4: centre dashes up the beach road (skip the pier crossing).
+  for (let t = -HALF + 40; t <= HALF - 40; t += 40) {
+    if (Math.abs(t - HW_N) < 30 || Math.abs(t - CFG.PIER_Z) < 45) continue;
+    dashSpots.push([BEACH_ROAD_X, 0.03, t, 1]);
+  }
   const dashes = new THREE.InstancedMesh(dashGeo, dashMat, dashSpots.length);
   const dummy = new THREE.Object3D();
   dashSpots.forEach(([x, y, z, rot], i) => {
@@ -218,11 +281,21 @@ export function buildWorld(scene, CFG = CFG3D) {
   // One block = the square between four road centrelines. Each block holds
   // one large building or up to four small ones, by district density.
   const facadeCache = new Map();
+  // B4: facade family per district — glass towers downtown, brick in the
+  // old town and market streets, concrete elsewhere, with a little mix
+  // so no district is one flat material.
+  function facadeTypeFor(district, rng) {
+    if (district.id === 'northgate') return 'glass';
+    if (district.id === 'oldtown') return 'brick';
+    if (district.id === 'citrus') return rng() < 0.7 ? 'brick' : 'concrete';
+    if (district.id === 'boardwalk') return rng() < 0.5 ? 'brick' : 'concrete';
+    return 'concrete';
+  }
   function facadeMatFor(district) {
     if (!facadeCache.has(district.id)) {
       const set = [];
       for (let v = 0; v < 3; v++) {
-        const t = facadeTextures(district.wall, district.trim, 0.25 + rng() * 0.25, rng);
+        const t = facadeTextures(district.wall, district.trim, 0.25 + rng() * 0.25, rng, facadeTypeFor(district, rngB4), rngB4);
         const m = new THREE.MeshStandardMaterial({
           map: t.map, emissiveMap: t.emissive, emissive: new THREE.Color('#ffb45c'),
           emissiveIntensity: 0.15, roughness: 0.85,
@@ -234,6 +307,67 @@ export function buildWorld(scene, CFG = CFG3D) {
     }
     return facadeCache.get(district.id);
   }
+
+  // B4: real 3D facade relief — floor-slab lips, mullion strips and
+  // corner pillars are collected per building and drawn as three
+  // InstancedMeshes, so the window bands read recessed instead of flat
+  // without a draw call per building. Parapets likewise. Rooftop props
+  // and storefronts are ordinary meshes (few dozen each).
+  const ledgeMat = mat('#cfc8b8', { roughness: 0.95 });
+  const mullionMat = mat('#33383f', { roughness: 0.7, metalness: 0.2 });
+  const parapetMat = mat('#4a4640', { roughness: 0.95 });
+  const acMat = mat('#9aa0a6', { roughness: 0.6, metalness: 0.4 });
+  const tankMat = mat('#8a6f4d', { roughness: 0.9 });
+  const antMat = mat('#5a5f66', { roughness: 0.5, metalness: 0.6 });
+  const skylightMat = new THREE.MeshStandardMaterial({ color: '#9fc4d8', roughness: 0.15, metalness: 0.4 });
+  const ledgeSpots = [];    // [x, y, z, sx, sy, sz] floor-slab lips
+  const mullionSpots = [];  // [x, y, z, sx, sy, sz] vertical strips + pillars
+  const parapetSpots = [];  // [x, y, z, sx, sy, sz] roof-edge walls
+  let tallestGen = null;    // tallest generated building (gets a beacon)
+  function instancedBoxes(spots, material) {
+    const im = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), material, spots.length);
+    spots.forEach(([x, y, z, sx, sy, sz], i) => {
+      dummy.position.set(x, y, z);
+      dummy.scale.set(sx, sy, sz);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      im.setMatrixAt(i, dummy.matrix);
+    });
+    im.instanceMatrix.needsUpdate = true;
+    im.receiveShadow = true;
+    group.add(im);
+    // The shared dummy is reused by palms/pools below — leave it clean.
+    dummy.scale.set(1, 1, 1);
+    dummy.rotation.set(0, 0, 0);
+    return im;
+  }
+
+  // B4: aviation beacon — red, blinking, on the tallest tower. The live
+  // loop has no per-frame world hook, so the material blinks itself in
+  // onBeforeRender (fires every rendered frame); updateBeacon below is
+  // the deterministic twin for staged shots.
+  const beaconMat = new THREE.MeshStandardMaterial({
+    color: '#ff5c7a', emissive: new THREE.Color('#ff2a4a'), emissiveIntensity: 2.6,
+  });
+  beaconMat.onBeforeRender = function () {
+    const t = (typeof performance !== 'undefined' ? performance.now() : 0) / 1000;
+    beaconMat.emissiveIntensity = (t % 2.0) < 1.6 ? 2.6 : 0.15;
+  };
+  function updateBeacon(timeS) {
+    const cycle = ((timeS % 2.0) + 2.0) % 2.0;
+    beaconMat.emissiveIntensity = cycle < 1.6 ? 2.6 : 0.15;
+  }
+
+  // B4: striped shop awnings + coloured fascia boards for ground floors.
+  const awningTexB4 = canvasTexture(128, 64, (g, w, h) => {
+    for (let x = 0; x < w; x += 16) {
+      g.fillStyle = (x / 16) % 2 === 0 ? '#e2725b' : '#f2ead8';
+      g.fillRect(x, 0, 16, h);
+    }
+  });
+  awningTexB4.wrapS = awningTexB4.wrapT = THREE.RepeatWrapping;
+  const awningMatB4 = new THREE.MeshStandardMaterial({ map: awningTexB4, roughness: 0.9, side: THREE.DoubleSide });
+  const fasciaMats = ['#e2725b', '#2a9d8f', '#e9c46a', '#4361ee'].map((c) => mat(c, { roughness: 0.7 }));
 
   const blockN = Math.round((HALF * 2) / BLOCK); // 14 blocks per side
   // Landmark blocks are reserved for hand-placed landmarks (CFG.LANDMARKS);
@@ -261,7 +395,17 @@ export function buildWorld(scene, CFG = CFG3D) {
         const lz = lots === 1 ? cz : cz + (l < 2 ? -span / 4 : span / 4);
         const w = (lots === 1 ? span * (0.7 + rng() * 0.25) : span * 0.42);
         const d = (lots === 1 ? span * (0.7 + rng() * 0.25) : span * 0.42);
-        const h = hMin + rng() * (hMax - hMin);
+        // B4: wider height variation — downtown spikes, low-rise bias in
+        // the residential districts, occasional mid-rise spike elsewhere.
+        // (rngB4: the main stream, and the footprints, are untouched.)
+        let h = hMin + rng() * (hMax - hMin);
+        if (district.id === 'northgate') {
+          if (rngB4() < 0.22) h = Math.min(h * 1.35, 190);
+        } else if (district.id === 'palmheights' || district.id === 'boardwalk' || district.id === 'marina') {
+          h = hMin + Math.pow(rngB4(), 1.6) * (hMax - hMin);
+        } else if (rngB4() < 0.12) {
+          h = Math.min(h * 1.3, hMax * 1.5);
+        }
         const fm = facades[Math.floor(rng() * facades.length)];
         const tower = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), fm);
         tower.position.set(lx, h / 2, lz);
@@ -275,8 +419,86 @@ export function buildWorld(scene, CFG = CFG3D) {
         group.add(slab);
         buildings.push({ mesh: tower, district, h, x: lx, z: lz, w, d });
         colliders.push({ x0: lx - w / 2, z0: lz - d / 2, x1: lx + w / 2, z1: lz + d / 2, h });
+        if (!tallestGen || h > tallestGen.h) tallestGen = { x: lx, z: lz, h, w, d };
+        // B4: recessed window bands — a floor-slab lip at every 3 m
+        // storey line, so the glazing sits behind the slab edge.
+        const floors = Math.max(1, Math.round(h / 3));
+        for (let f = 1; f < floors; f++) ledgeSpots.push([lx, f * 3, lz, w + 0.5, 0.28, d + 0.5]);
+        // B4: vertical mullion strips on the front/back faces + corner
+        // pillars, proud of the wall by a few centimetres.
+        const mullions = Math.max(2, Math.floor(w / 7));
+        for (let m = 0; m <= mullions; m++) {
+          const mx = lx - w / 2 + (m * w) / mullions;
+          mullionSpots.push([mx, h / 2, lz + d / 2 + 0.07, 0.32, h, 0.32]);
+          mullionSpots.push([mx, h / 2, lz - d / 2 - 0.07, 0.32, h, 0.32]);
+        }
+        for (const [px, pz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+          mullionSpots.push([lx + px * (w / 2 + 0.05), h / 2, lz + pz * (d / 2 + 0.05), 0.55, h, 0.55]);
+        }
+        // B4: parapet — four low walls on the roof edge.
+        const py = h + 1.2 + 0.5;
+        parapetSpots.push([lx, py, lz + d / 2, w + 1, 1.0, 0.5]);
+        parapetSpots.push([lx, py, lz - d / 2, w + 1, 1.0, 0.5]);
+        parapetSpots.push([lx + w / 2, py, lz, 0.5, 1.0, d + 1]);
+        parapetSpots.push([lx - w / 2, py, lz, 0.5, 1.0, d + 1]);
+        // B4: rooftop props on a share of buildings — AC unit, water
+        // tank, antenna or skylight, one per roof.
+        if (rngB4() < 0.45 && w > 18 && d > 18) {
+          const slabTop = h + 1.2;
+          const rx = lx + (rngB4() - 0.5) * w * 0.4;
+          const rz = lz + (rngB4() - 0.5) * d * 0.4;
+          const pick = rngB4();
+          if (pick < 0.35) {
+            box(3, 1.4, 2.2, acMat, rx, slabTop + 0.7, rz);
+          } else if (pick < 0.6) {
+            const tank = new THREE.Mesh(new THREE.CylinderGeometry(1.6, 1.6, 3.2, 10), tankMat);
+            tank.position.set(rx, slabTop + 1.6, rz);
+            tank.castShadow = true;
+            group.add(tank);
+            const cone = new THREE.Mesh(new THREE.ConeGeometry(1.8, 1.2, 10), tankMat);
+            cone.position.set(rx, slabTop + 3.8, rz);
+            group.add(cone);
+          } else if (pick < 0.8) {
+            const ant = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, 7, 6), antMat);
+            ant.position.set(rx, slabTop + 3.5, rz);
+            group.add(ant);
+            box(2.4, 0.15, 0.15, antMat, rx, slabTop + 6.0, rz);
+          } else {
+            box(4, 0.7, 2.6, skylightMat, rx, slabTop + 0.35, rz);
+          }
+        }
+        // B4: ground-floor storefront — glass, striped awning, fascia
+        // board — on the market streets and some marina fronts.
+        const shopStreet = district.id === 'citrus' || district.id === 'boardwalk';
+        if ((shopStreet && rngB4() < 0.55) || (district.id === 'marina' && rngB4() < 0.25)) {
+          const glassMat = new THREE.MeshStandardMaterial({
+            color: '#1c2836', metalness: 0.55, roughness: 0.25,
+            emissive: new THREE.Color('#ff9a3c'), emissiveIntensity: 0.1,
+          });
+          facadeMats.push(glassMat); // setWindowGlow warms it at night
+          const glass = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(w * 0.8, 22), 3.0), glassMat);
+          glass.position.set(lx, 1.9, lz + d / 2 + 0.28);
+          group.add(glass);
+          const awn = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(w * 0.85, 24), 2.4), awningMatB4);
+          awn.rotation.x = -Math.PI / 2 + 0.45;
+          awn.position.set(lx, 3.9, lz + d / 2 + 1.1);
+          group.add(awn);
+          box(Math.min(w * 0.6, 16), 1.1, 0.35, fasciaMats[Math.floor(rngB4() * fasciaMats.length)], lx, 4.9, lz + d / 2 + 0.3);
+        }
       }
     }
+  }
+
+  // B4: draw the collected facade relief as three instanced meshes.
+  instancedBoxes(ledgeSpots, ledgeMat);
+  instancedBoxes(mullionSpots, mullionMat);
+  instancedBoxes(parapetSpots, parapetMat);
+  // B4: blinking beacon on the tallest generated building (Torre Brisa,
+  // the overall tallest, gets the same material below).
+  if (tallestGen) {
+    const genTip = new THREE.Mesh(new THREE.SphereGeometry(1.6, 10, 8), beaconMat);
+    genTip.position.set(tallestGen.x, tallestGen.h + 1.2 + 1.6, tallestGen.z);
+    group.add(genTip);
   }
 
   // ---- pier + wheel ------------------------------------------------------
@@ -345,7 +567,7 @@ export function buildWorld(scene, CFG = CFG3D) {
     });
     neonMats.push(crownMat);
     box(66, 3, 32, crownMat, -1100, 97, -900);
-    const hotelTex = facadeTextures('#e8e2d4', '#256b74', 0.4, rng);
+    const hotelTex = facadeTextures('#e8e2d4', '#256b74', 0.4, rng, undefined, rngB4);
     hotel.material = new THREE.MeshStandardMaterial({
       map: hotelTex.map, emissiveMap: hotelTex.emissive,
       emissive: new THREE.Color('#ffb45c'), emissiveIntensity: 0.15, roughness: 0.7,
@@ -360,11 +582,10 @@ export function buildWorld(scene, CFG = CFG3D) {
     const tm = new THREE.MeshStandardMaterial({ color: '#7fa0c4', roughness: 0.25, metalness: 0.55 });
     const tower = box(44, 170, 44, tm, 900, 85, -900);
     box(30, 26, 30, tm, 900, 183, -900);
-    const tipMat = new THREE.MeshStandardMaterial({
-      color: '#ff5c7a', emissive: new THREE.Color('#ff2a4a'), emissiveIntensity: 1.2,
-    });
-    neonMats.push(tipMat);
-    const tip = new THREE.Mesh(new THREE.SphereGeometry(2.2, 10, 8), tipMat);
+    // B4: the tip is the aviation beacon — shared beaconMat blinks on its
+    // own (onBeforeRender) and via updateBeacon; it is NOT in neonMats,
+    // so setNeonGlow never fights the blink.
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(2.2, 10, 8), beaconMat);
     tip.position.set(900, 198, -900);
     group.add(tip);
     landmarks.push({ id: 'brisa', mesh: tower });
@@ -537,11 +758,20 @@ export function buildWorld(scene, CFG = CFG3D) {
       const color = neonColors[Math.floor(rng() * neonColors.length)];
       const nm = new THREE.MeshStandardMaterial({
         color: '#111111', emissive: new THREE.Color(color), emissiveIntensity: 0.9,
+        side: THREE.DoubleSide,
       });
       neonMats.push(nm);
-      const sign = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(b.w * 0.6, 18), 2.2), nm);
+      const sign = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(b.w * 0.6, 18), 1.6 + rngB4() * 1.6), nm);
       sign.position.set(b.x, b.h * 0.55, b.z + b.d / 2 + 0.2);
       group.add(sign);
+      // B4: blade sign — a vertical fin projecting from the facade, read
+      // from along the street, on a share of signed fronts.
+      if (rngB4() < 0.4) {
+        const blade = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 4.5), nm);
+        blade.rotation.y = Math.PI / 2;
+        blade.position.set(b.x - b.w * 0.25, b.h * 0.5, b.z + b.d / 2 + 1.2);
+        group.add(blade);
+      }
       placed++;
     }
   }
@@ -696,6 +926,8 @@ export function buildWorld(scene, CFG = CFG3D) {
       tl.yellow.material.emissiveIntensity = amber ? 2.2 : 0;
       tl.group.rotation.y = 0;
     }
+    // B4: the aviation beacon blinks on the same clock as the lights.
+    updateBeacon(timeS);
   }
   updateTrafficLights(0);
 
@@ -720,6 +952,6 @@ export function buildWorld(scene, CFG = CFG3D) {
     palms: palmSpots, lamps: lampHeads, ocean, beach, pier: pierGroup, wheel,
     facadeMats, lampHeadMat, landmarks, yachts, umbrellas: umbrellaSpots, neonMats,
     districtAt, isSolid, nearestRoadPoint, randomRoadSpot,
-    updateTrafficLights, setWindowGlow, setLampGlow, setNeonGlow,
+    updateTrafficLights, updateBeacon, setWindowGlow, setLampGlow, setNeonGlow,
   };
 }

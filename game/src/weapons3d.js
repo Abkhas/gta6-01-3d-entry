@@ -240,7 +240,9 @@ export function createWeapons(player, hooks) {
   // Per-frame update. `input` carries the aim point and trigger state
   // from the main loop: { aimX, aimZ, firing, pressed }.
   //   aimX/aimZ: world point under the cursor (ground plane).
-  //   firing: left mouse held (auto weapons keep firing).
+  //   firing: left mouse held (auto weapons keep firing). The main
+  //   loop only passes it while aiming on foot, or from a vehicle
+  //   as a drive-by; a held trigger with no aim never reaches here.
   //   pressed: left mouse went down this frame (semi-auto fires once).
   function update(dt, input) {
     ensureSlots();
@@ -274,7 +276,10 @@ export function createWeapons(player, hooks) {
     const onContext = (e) => e.preventDefault();
     const onMouseDown = (e) => {
       if (e.button === 2) { e.preventDefault(); setAiming(true); }
-      else if (e.button === 0) {
+      else if (e.button === 0 && (player.vehicle || player.aiming)) {
+        // Left mouse only shoots while aiming on foot, or from a
+        // vehicle as a drive-by. A click with no RMB held on foot
+        // does nothing: no shot, no wasted round, no police call.
         sys.firing = true;
         if (!weaponDef(player.weapon).auto) {
           if (player.vehicle) fireDriveBy();
@@ -285,6 +290,10 @@ export function createWeapons(player, hooks) {
     const onMouseUp = (e) => {
       if (e.button === 2) setAiming(false);
       if (e.button === 0) sys.firing = false;
+    };
+    const onBlur = () => {
+      setAiming(false);
+      sys.firing = false;
     };
     const onKeyDown = (e) => {
       if (e.key === 'Tab') { e.preventDefault(); sys.wheelOpen = true; }
@@ -297,9 +306,10 @@ export function createWeapons(player, hooks) {
     canvas.addEventListener('contextmenu', onContext);
     canvas.addEventListener('mousedown', onMouseDown);
     window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('blur', onBlur);
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
-    sys._bound = { onContext, onMouseDown, onMouseUp, onKeyDown, onKeyUp, canvas };
+    sys._bound = { onContext, onMouseDown, onMouseUp, onBlur, onKeyDown, onKeyUp, canvas };
     return true;
   }
 
@@ -309,6 +319,7 @@ export function createWeapons(player, hooks) {
     b.canvas.removeEventListener('contextmenu', b.onContext);
     b.canvas.removeEventListener('mousedown', b.onMouseDown);
     window.removeEventListener('mouseup', b.onMouseUp);
+    window.removeEventListener('blur', b.onBlur);
     window.removeEventListener('keydown', b.onKeyDown);
     window.removeEventListener('keyup', b.onKeyUp);
     sys._bound = null;

@@ -667,13 +667,15 @@ function applyLoadedSave(saved) {
 
 // ---------------------------------------------------------------------
 // Input. WASD drive/walk, E enter/exit + mission, Q radio, Z/X/V
-// crew, Esc pause, F9 save, T retry, Space handbrake. Mouse aim and
-// firing, reload and the weapon wheel belong to weapons.bindInput —
+// crew, Esc pause, F9 save, T retry, Space handbrake. Hold the
+// right mouse button to aim and the left one to fire while aiming;
+// reload and the weapon wheel belong to weapons.bindInput —
 // main3d only reads the mouse world point for the aim ray.
 // ---------------------------------------------------------------------
 const keys = new Set();
 let mouseWorld = null;
 let mouseHeld = false;
+let rmbHeld = false;
 
 const raycaster = new THREE.Raycaster();
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -687,11 +689,27 @@ function updateMouseWorld(e) {
   raycaster.setFromCamera(mouseNdc, camera);
   const hit = new THREE.Vector3();
   if (raycaster.ray.intersectPlane(groundPlane, hit)) mouseWorld = { x: hit.x, z: hit.z };
+  // The buttons bitmask is the ground truth for a held button: it
+  // re-asserts rmbHeld on every mouse move, so a right-click whose
+  // mouseup the page never sees (menu, lost focus) cannot leave
+  // the player stuck aiming, and a contextmenu clear below cannot
+  // kill a genuine hold the moment the mouse moves again.
+  if (typeof e.buttons === 'number') rmbHeld = (e.buttons & 2) !== 0;
 }
 canvas.addEventListener('mousemove', updateMouseWorld);
-canvas.addEventListener('mousedown', function (e) { if (e.button === 0) mouseHeld = true; });
-window.addEventListener('mouseup', function (e) { if (e.button === 0) mouseHeld = false; });
-canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+canvas.addEventListener('mousedown', function (e) {
+  if (e.button === 0) mouseHeld = true;
+  if (e.button === 2) rmbHeld = true;
+});
+window.addEventListener('mouseup', function (e) {
+  if (e.button === 0) mouseHeld = false;
+  if (e.button === 2) rmbHeld = false;
+});
+window.addEventListener('blur', function () { mouseHeld = false; rmbHeld = false; });
+canvas.addEventListener('contextmenu', function (e) {
+  e.preventDefault();
+  rmbHeld = false;
+});
 
 weapons.bindInput(canvas);
 
@@ -1197,17 +1215,23 @@ function tick() {
     S.radioStation = radio.stationIndex;
     S.radioTrack = radio.nowPlaying();
 
-    // Aim from the mouse; weapons owns firing/reload/wheel keys.
-    if (mouseWorld && !p.vehicle) {
-      p.aim = Math.atan2(mouseWorld.z - p.z, mouseWorld.x - p.x);
-      p.aiming = true;
-    } else if (!p.vehicle) {
-      p.aiming = false;
-    }
+    // Aim only while the right mouse button is held, on foot.
+    // weapons.setAiming is the one writer of the aiming flag: the
+    // loop never assigns p.aiming itself, so it cannot disagree
+    // with the input binder about whether the player is aiming.
+    // With no RMB held the player faces the movement direction
+    // instead (stepOnFoot only turns to the aim while aiming).
+    // weapons.update still steers p.aim at the cursor every frame,
+    // so pressing RMB aims instantly with no snap; the trigger
+    // below is what actually gates the shot. In a vehicle the
+    // drive-by keeps its old behaviour: LMB fires from the car
+    // with no RMB needed, and aiming stays off.
+    const wantAim = rmbHeld && !p.vehicle && !!mouseWorld;
+    weapons.setAiming(wantAim);
     weapons.update(dt, {
       aimX: mouseWorld ? mouseWorld.x : p.x + Math.cos(p.aim),
       aimZ: mouseWorld ? mouseWorld.z : p.z + Math.sin(p.aim),
-      firing: mouseHeld,
+      firing: mouseHeld && (!!p.vehicle || wantAim),
       pressed: false
     });
 

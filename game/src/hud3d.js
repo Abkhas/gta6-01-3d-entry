@@ -401,10 +401,14 @@
   }
 
   // ---- minimap ----------------------------------------------------------
-  // A 2D canvas: real street network from the city adapter, districts,
-  // route to the mission marker, police dots, player arrow, N compass
-  // and the district-standing chip. World coords are 3D metres:
-  // x east, z south; the map's vertical axis is z (south = down).
+  // A 2D canvas: real street geometry from the city adapter (building
+  // footprints as brown blocks, roads as dark bands with pale centre
+  // lines), districts, a solid route to the waypoint diamond, red
+  // police blips, a blue player arrow, N compass and the
+  // district-standing chip. Health + armour bars sit in a strip along
+  // the bottom of the panel; a red border flashes while wanted.
+  // World coords are 3D metres: x east, z south; the map's vertical
+  // axis is z (south = down).
 
   function mapBounds(city) {
     if (city && typeof city.mapX0 === 'number') {
@@ -417,57 +421,136 @@
     return { x0: 0, x1: 4200, z0: 0, z1: 3200 };
   }
 
+  // One labelled bar of the minimap's bottom strip: label at the
+  // left, dark track, coloured fill, number at the right.
+  function drawMiniBar(ctx, x, y, w, h, frac, color, label, num) {
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 8px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(label, 4, y + h - 1);
+    ctx.fillStyle = '#2a2a30';
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, Math.max(0, w * frac), h);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'right';
+    ctx.fillText(String(num), x + w + 24, y + h - 1);
+    ctx.textAlign = 'left';
+  }
+
   function drawMinimap(dom, state, city) {
     var canvas = dom.minimap;
     var ctx = canvas.getContext('2d');
     if (!ctx) return;
     var W = canvas.width, H = canvas.height;
+    var barH = 26;
+    var mapH = H - barH;
     var b = mapBounds(city);
     function mx(wx) { return ((wx - b.x0) / (b.x1 - b.x0)) * W; }
-    function mz(wz) { return ((wz - b.z0) / (b.z1 - b.z0)) * H; }
+    function mz(wz) { return ((wz - b.z0) / (b.z1 - b.z0)) * mapH; }
     var c3 = config3d();
     var shoreX = c3 ? c3.SHORE_X : b.x0 + 180;
     var sandX = c3 ? c3.BEACH_X : b.x0 + 300;
+    var wanted = state.wanted || 0;
+    var pulse = 0.5 + 0.5 * Math.sin((state.time || 0) * 5);
 
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = 'rgba(8,18,14,0.80)';
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#16241b';
+    ctx.fillRect(0, 0, W, mapH);
     // Ocean, then the sand band, along the west edge.
     ctx.fillStyle = '#1f6f8f';
-    ctx.fillRect(0, 0, Math.max(0, mx(shoreX)), H);
+    ctx.fillRect(0, 0, Math.max(0, mx(shoreX)), mapH);
     ctx.fillStyle = '#c9b078';
-    ctx.fillRect(Math.max(0, mx(shoreX)), 0, Math.max(0, mx(sandX) - mx(shoreX)), H);
+    ctx.fillRect(Math.max(0, mx(shoreX)), 0, Math.max(0, mx(sandX) - mx(shoreX)), mapH);
 
+    // City blocks: real building footprints when the city adapter
+    // carries them, otherwise the block cells of the road grid.
+    // Warm brown blocks on dark ground read as a street map at a glance.
+    var avenues = (city && city.avenues) || [];
+    var streets = (city && city.streets) || [];
+    var buildings = (city && city.buildings) || [];
+    if (buildings.length) {
+      for (var bi = 0; bi < buildings.length; bi++) {
+        var bd = buildings[bi];
+        var bx0 = mx(bd.x0), bz0 = mz(bd.z0 !== undefined ? bd.z0 : bd.y0);
+        var bx1 = mx(bd.x1), bz1 = mz(bd.z1 !== undefined ? bd.z1 : bd.y1);
+        if (bx1 < 0 || bz1 < 0 || bx0 > W || bz0 > mapH) continue;
+        ctx.fillStyle = '#7a5c3e';
+        ctx.fillRect(bx0, bz0, Math.max(1, bx1 - bx0), Math.max(1, bz1 - bz0));
+      }
+    } else {
+      for (var gx = 0; gx + 1 < avenues.length; gx++) {
+        for (var gz = 0; gz + 1 < streets.length; gz++) {
+          var cx0 = mx(avenues[gx]) + 1.5, cz0 = mz(streets[gz]) + 1.5;
+          var cx1 = mx(avenues[gx + 1]) - 1.5, cz1 = mz(streets[gz + 1]) - 1.5;
+          if (cx1 <= cx0 || cz1 <= cz0) continue;
+          ctx.fillStyle = ((gx + gz) % 2 === 0) ? '#6e5138' : '#7a5c3e';
+          ctx.fillRect(cx0, cz0, cx1 - cx0, cz1 - cz0);
+        }
+      }
+    }
     var districts = (city && city.districts) ||
       (c3 ? c3.DISTRICTS : ((config() || {}).DISTRICTS || []));
     for (var d = 0; d < districts.length; d++) {
       var dist = districts[d];
       var x0 = dist.x0, z0 = (dist.z0 !== undefined ? dist.z0 : dist.y0);
       var x1 = dist.x1, z1 = (dist.z1 !== undefined ? dist.z1 : dist.y1);
-      ctx.fillStyle = (dist.accent || '#ffd166') + '22';
+      ctx.fillStyle = (dist.accent || '#ffd166') + '14';
       ctx.fillRect(mx(x0), mz(z0), mx(x1) - mx(x0), mz(z1) - mz(z0));
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
       ctx.font = 'bold 8px system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText((dist.short || dist.name || '').toUpperCase(),
         (mx(x0) + mx(x1)) / 2, (mz(z0) + mz(z1)) / 2);
       ctx.textAlign = 'left';
     }
-    // Streets: every avenue (north-south) and street (east-west).
-    var avenues = (city && city.avenues) || [];
-    var streets = (city && city.streets) || [];
-    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-    ctx.lineWidth = 1.2;
+    // Roads: dark bands with a pale centre line, so the blocks read
+    // as blocks and the roads as roads. Highways run thicker, in gold.
     for (var a = 0; a < avenues.length; a++) {
+      var ax = mx(avenues[a]);
+      var wideA = !!(c3 && avenues[a] === c3.HIGHWAY_EAST_X);
+      ctx.strokeStyle = '#10160f';
+      ctx.lineWidth = wideA ? 5 : 3;
       ctx.beginPath();
-      ctx.moveTo(mx(avenues[a]), 0);
-      ctx.lineTo(mx(avenues[a]), H);
+      ctx.moveTo(ax, 0);
+      ctx.lineTo(ax, mapH);
+      ctx.stroke();
+      ctx.strokeStyle = wideA ? '#e8c53a' : 'rgba(232,220,190,0.75)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(ax, 0);
+      ctx.lineTo(ax, mapH);
       ctx.stroke();
     }
     for (var s = 0; s < streets.length; s++) {
+      var sz = mz(streets[s]);
+      var wideS = !!(c3 && streets[s] === c3.HIGHWAY_NORTH_Z);
+      ctx.strokeStyle = '#10160f';
+      ctx.lineWidth = wideS ? 5 : 3;
       ctx.beginPath();
-      ctx.moveTo(0, mz(streets[s]));
-      ctx.lineTo(W, mz(streets[s]));
+      ctx.moveTo(0, sz);
+      ctx.lineTo(W, sz);
+      ctx.stroke();
+      ctx.strokeStyle = wideS ? '#e8c53a' : 'rgba(232,220,190,0.75)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, sz);
+      ctx.lineTo(W, sz);
+      ctx.stroke();
+    }
+    if (city && typeof city.beachRoadX === 'number') {
+      var brx = mx(city.beachRoadX);
+      ctx.strokeStyle = '#10160f';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(brx, 0);
+      ctx.lineTo(brx, mapH);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(232,220,190,0.75)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(brx, 0);
+      ctx.lineTo(brx, mapH);
       ctx.stroke();
     }
     // Landmarks: the wheel, the pier, the tower.
@@ -494,66 +577,111 @@
         ctx.fill();
       }
     }
-    // Dashed route: player to the mission marker, along the grid.
+    // Route: a solid gold line with a pale casing, player to the
+    // mission marker along the grid, ending in a waypoint diamond
+    // with a pulsing ring.
     var target = state.missionTarget;
     var p = state.player;
     var pz = (p.z !== undefined ? p.z : p.y);
     if (target) {
       var tz = (target.z !== undefined ? target.z : target.y);
-      ctx.strokeStyle = '#ffd166';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 5]);
+      var tx = mx(target.x), ty = mz(tz);
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 4;
       ctx.beginPath();
       ctx.moveTo(mx(p.x), mz(pz));
-      ctx.lineTo(mx(target.x), mz(pz));
-      ctx.lineTo(mx(target.x), mz(tz));
+      ctx.lineTo(tx, mz(pz));
+      ctx.lineTo(tx, ty);
       ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = '#ffd166';
+      ctx.strokeStyle = '#ffc21c';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(mx(p.x), mz(pz));
+      ctx.lineTo(tx, mz(pz));
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,194,28,' + (0.5 + 0.5 * pulse).toFixed(2) + ')';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(tx, ty, 9 + 2 * pulse, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = '#ffc21c';
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5;
       ctx.save();
-      ctx.translate(mx(target.x), mz(tz));
+      ctx.translate(tx, ty);
       ctx.rotate(Math.PI / 4);
-      ctx.fillRect(-5, -5, 10, 10);
+      ctx.fillRect(-6, -6, 12, 12);
+      ctx.strokeRect(-6, -6, 12, 12);
       ctx.restore();
     }
-    // Police dots: flashing red/blue on the cruisers, white ring on AIR-1.
+    // Police blips: red dots with a white ring, pulsing while wanted.
+    // The heli reads as a red ring with a red centre.
     if (state.police) {
-      var flash = Math.floor((state.time || 0) * 2) % 2 === 0;
       var units = state.police.units || [];
       for (var u = 0; u < units.length; u++) {
         var car = units[u].car || units[u].ped || units[u];
         var ux = car.x || 0, uz = (car.z !== undefined ? car.z : (car.y || 0));
-        ctx.fillStyle = flash ? '#ff3b30' : '#2e6bff';
+        var ur = wanted > 0 ? 3.5 + 1.5 * pulse : 3.5;
+        ctx.fillStyle = '#ff3b30';
         ctx.beginPath();
-        ctx.arc(mx(ux), mz(uz), 3.5, 0, Math.PI * 2);
+        ctx.arc(mx(ux), mz(uz), ur, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(mx(ux), mz(uz), ur, 0, Math.PI * 2);
+        ctx.stroke();
       }
       if (state.police.heli) {
         var hx = state.police.heli.x, hz = (state.police.heli.z !== undefined ? state.police.heli.z : state.police.heli.y);
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 1.5;
+        var hr = wanted > 0 ? 6 + 1.5 * pulse : 6;
+        ctx.strokeStyle = '#ff3b30';
+        ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(mx(hx), mz(hz), 5, 0, Math.PI * 2);
+        ctx.arc(mx(hx), mz(hz), hr, 0, Math.PI * 2);
         ctx.stroke();
-        ctx.fillStyle = '#fff';
+        ctx.fillStyle = '#ff3b30';
         ctx.beginPath();
-        ctx.arc(mx(hx), mz(hz), 2, 0, Math.PI * 2);
+        ctx.arc(mx(hx), mz(hz), 2.5, 0, Math.PI * 2);
         ctx.fill();
       }
     }
-    // Player arrow, pointing where Rey is heading.
+    // Player arrow: blue, white-outlined, pointing where Rey heads.
     var ang = (p.vehicle ? p.vehicle.angle : p.angle) || 0;
     ctx.save();
     ctx.translate(mx(p.x), mz(pz));
     ctx.rotate(ang);
-    ctx.fillStyle = '#ffd166';
+    ctx.fillStyle = '#2f9bff';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(8, 0);
-    ctx.lineTo(-6, -5);
-    ctx.lineTo(-6, 5);
+    ctx.moveTo(11, 0);
+    ctx.lineTo(-8, -7);
+    ctx.lineTo(-4, 0);
+    ctx.lineTo(-8, 7);
     ctx.closePath();
     ctx.fill();
+    ctx.stroke();
     ctx.restore();
+
+    // Health + armour bars along the bottom of the minimap panel.
+    var barY = mapH + 4;
+    ctx.fillStyle = 'rgba(8,12,18,0.92)';
+    ctx.fillRect(0, mapH, W, barH);
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillRect(0, mapH, W, 1);
+    drawMiniBar(ctx, 24, barY, W - 52, 8, clamp(p.health || 0, 0, 100) / 100, '#4caf50', 'HP', Math.round(p.health || 0));
+    drawMiniBar(ctx, 24, barY + 11, W - 52, 8, clamp(p.armour || 0, 0, 100) / 100, '#7ec3e8', 'AR', Math.round(p.armour || 0));
+    // Wanted feedback: a red border that flashes while the heat is on,
+    // plus a faint red wash over the map.
+    if (wanted > 0) {
+      ctx.fillStyle = 'rgba(255,59,48,' + (0.05 + 0.06 * pulse).toFixed(2) + ')';
+      ctx.fillRect(0, 0, W, mapH);
+      ctx.strokeStyle = 'rgba(255,59,48,' + (0.55 + 0.45 * pulse).toFixed(2) + ')';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(1.5, 1.5, W - 3, H - 3);
+    }
   }
 
   // ---- per-frame update -------------------------------------------------
@@ -656,6 +784,7 @@
 
     // Minimap + standing chip.
     drawMinimap(dom, state, city);
+    dom.minimapWrap.classList.toggle('pv3d-minimap-wanted', (state.wanted || 0) > 0);
     var dVal = null;
     if (state.district && state.standing && typeof state.standing[state.district.name] === 'number') {
       dVal = state.standing[state.district.name];
@@ -834,6 +963,7 @@
       '.pv3d-minimap{display:block;background:rgba(8,18,14,0.8)}',
       '.pv3d-minimap-chip{position:absolute;left:4px;top:4px;background:rgba(8,12,18,0.85);color:#ffd166;font-size:10px;font-weight:700;padding:2px 6px}',
       '.pv3d-minimap-compass{position:absolute;right:6px;top:4px;color:#fff;font-size:11px;font-weight:700}',
+      '.pv3d-minimap-wanted{outline:2px solid #ff3b30;outline-offset:-2px}',
       '.pv3d-dialogue{padding:8px 10px 8px 66px}',
       '.pv3d-dialogue-portrait{position:absolute;left:12px;top:50%;margin-top:-22px;width:44px;height:44px;border-radius:50%;background:#c94f3d;color:#fff;font-size:16px;font-weight:700;display:flex;align-items:center;justify-content:center}',
       '.pv3d-dialogue-name{font-size:13px;font-weight:700;color:#ffd166}',

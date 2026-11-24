@@ -810,7 +810,7 @@
     var foot = el('div', 'pv3d-title-foot', stage);
     setText(foot, 'PRESS ENTER TO START  ·  ARROWS PICK A SLOT');
     var controls = el('div', 'pv3d-title-controls', stage);
-    setText(controls, 'WASD walk / drive   ·   E enter & exit car / start mission   ·   Mouse aim, click fire   ·   R reload   ·   Q radio   ·   Z / X / V crew   ·   Esc pause   ·   F9 save');
+    setText(controls, 'WASD walk / drive   ·   E enter & exit car / start mission   ·   Hold RMB to aim, LMB fire   ·   R reload   ·   Q radio   ·   Z / X / V crew   ·   Esc pause   ·   F9 save');
     var meta = el('div', 'pv3d-title-meta', stage);
     setText(meta, clockStr(state.clockMinutes) + '  ·  ' +
       (state.district ? state.district.name.toUpperCase() : 'PALMA VERDE') +

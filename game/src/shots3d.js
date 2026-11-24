@@ -362,21 +362,40 @@
       [[-1423, 540, -Math.PI / 2], [-1437, 660, Math.PI / 2], [-1423, 740, -Math.PI / 2], [-1437, 780, Math.PI / 2]],
       [[-1437, 570, Math.PI / 2], [-1423, 800, -Math.PI / 2]],
       [-1452, 620]);
-    // AIR-1 stays at the dispatch offset (hero +140, -130): at chase
-    // framing the police heli would crowd the hero's roof if it were
-    // in-frame, so it stays off-frame east and the dispatch board
-    // carries it — the Gull gets her own shot.
+    // AIR-1 IN FRAME (r6): the old dispatch offset (hero +140 east,
+    // -130 north, alt 60) put the heli ~24 deg above the horizon —
+    // far over the 42-deg lens's top edge (~9.7 deg), so it never
+    // rendered. Park her ahead over the beach road instead: 180 m
+    // north, 12 m east of the centreline, alt 22 m. From the chase
+    // lens that is ~6 deg above the horizon, ~9% down from the top
+    // of the frame — mid sky-band, just right of centre, above the
+    // traffic column. Both alt and altitude are set: the police
+    // system reads alt, the renderer reads altitude.
     if (state.police.heli) {
-      state.police.heli.x = hero.x + 140;
-      state.police.heli.z = hero.z - 130;
+      state.police.heli.x = hero.x + 12;
+      state.police.heli.z = hero.z - 180;
+      state.police.heli.alt = 22;
+      state.police.heli.altitude = 22;
+      state.police.heli.angle = 0;
+      state.police.heli.callsign = 'AIR-1';
     }
-    // Beach-road rush hour: movers on the road north and south of
-    // the hero, strollers on the sand, walkers on the city sidewalk.
+    // Beach-road rush hour: movers on the road north of the hero,
+    // strollers on the sand, walkers on the city sidewalk.
     var i;
-    for (i = 0; i < 12; i++) {
+    // Beach-road rush hour, denser (r6): 18 movers ahead of the hero
+    // on the road north, 26 m apart, both lanes full — the old loop
+    // put 12 cars straddling the hero, only 6 of them ahead. Lanes
+    // alternate west/east and the heading follows the lane
+    // (northbound east, southbound west), so nobody drives the
+    // wrong way. The grid starts 55 m ahead and clears the staged
+    // pursuit: the west-lane car at 545 m sits 25 m from the bike
+    // at 570, the east-lane car at 519 sits 21 m from the cruiser
+    // at 540.
+    for (i = 0; i < 18; i++) {
+      var lane = (i % 2 === 0) ? -7 : 7;
       state.cars.push({
-        x: road.x + (rng() < 0.5 ? -7 : 7), z: road.z - 220 + i * 40 + rng() * 12,
-        angle: rng() < 0.5 ? -Math.PI / 2 : Math.PI / 2, speed: 10 + rng() * 6,
+        x: road.x + lane, z: road.z - 55 - i * 26,
+        angle: lane < 0 ? Math.PI / 2 : -Math.PI / 2, speed: 10 + rng() * 6,
         model: { id: 'vela', name: 'Vela Sedan', color: SHIRT_COLORS[i % SHIRT_COLORS.length] }
       });
     }
@@ -415,10 +434,20 @@
     var rng = makeRng(seed * 7919 + 29);
     var state = buildBaseState(city, seed, 21 * 60 + 30);
     seedStreetLife(state, city, rng);
-    var road = nearestRoadPoint(city, -800, 100);
+    var road = nearestRoadPoint(city, -800, 0);
     var p = state.player;
-    p.x = road.x;
-    p.z = road.z;
+    // NIGHT POLISH (r6): Rey stands in a streetlamp pool. The avenue
+    // junction at (-800, 0) carries a lamp, pole at (-790, 10), with
+    // a warm light pool 9 m across on the asphalt under it — so Rey
+    // at (-784, 12), 6.3 m from the pole, stands inside the pool
+    // instead of in the dark mid-block. The spot is clear of the
+    // pole itself (off the camera axis, so the pole reads beside
+    // him, not through him) and clear of the building line, which
+    // starts 23 m off the centreline. Rivals, crowd and car below
+    // are all placed relative to him, so the whole scene moves
+    // with him up the avenue.
+    p.x = road.x + 16;
+    p.z = road.z + 12;
     p.y = road.z;
     p.angle = -Math.PI / 2;
     p.aiming = true;
@@ -479,8 +508,12 @@
     // Two units responding in-frame: a cruiser on the cross street
     // north of the market, a bike on the avenue below the rivals.
     // The foot officer and the second cruiser close in from off-frame.
+    // The cruiser sits at (-640, -180) — the same ~37 deg bearing
+    // off Rey's axis it had from the old spot, so moving Rey under
+    // the lamp does not push it out of frame; it stands on the
+    // kerb clear of the building line.
     placePolice(state,
-      [[-620, -140, Math.PI]],
+      [[-640, -180, Math.PI]],
       [[-792, -20, -Math.PI / 2]],
       null);
     setMission(state, 'the-drop', 'MISSION 4 "THE DROP"', 2, 3,
@@ -656,6 +689,10 @@
       }
       extras.push({ kind: 'neon', text: 'MERCADO', dx: -120, dz: -60, color: '#ff5a8a' });
       extras.push({ kind: 'neon', text: 'NEON', dx: 140, dz: -90, color: '#37e0c8' });
+    }
+    if (built.name === 'chase') {
+      var air = state.police && state.police.heli;
+      if (air) extras.push({ kind: 'heli-tag', x: air.x, z: air.z, altitude: air.altitude || air.alt || 22, label: 'AIR-1' });
     }
     if (built.name === 'heli') {
       var gull = state.player.vehicle;

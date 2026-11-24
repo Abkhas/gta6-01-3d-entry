@@ -72,6 +72,60 @@ function contactShadow(rx, rz, opacity) {
   return m;
 }
 
+// ---- headlight glow, beam and pool -----------------------------------
+//
+// One shared radial-gradient canvas texture for every lamp glow in
+// the city: drawn once, reused by all sprites and ground quads, so
+// twenty cars do not each bake their own texture. Additive blending
+// means the glow only ever adds light — it never paints a grey disc
+// over the road or the bodywork.
+var sharedGlowTex = null;
+function glowTexture() {
+  if (sharedGlowTex) return sharedGlowTex;
+  var c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 128;
+  var g = c.getContext('2d');
+  var grad = g.createRadialGradient(64, 64, 2, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.3, 'rgba(255,255,255,0.55)');
+  grad.addColorStop(0.7, 'rgba(255,255,255,0.12)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  var tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  sharedGlowTex = tex;
+  return tex;
+}
+
+// A camera-facing glow sprite: unlike a flat quad it reads from any
+// angle, so a headlight still blooms when the camera sits behind
+// the car on the chase view.
+function glowSprite(color, size) {
+  var mat = new THREE.SpriteMaterial({
+    map: glowTexture(), color: color, transparent: true, opacity: 0.8,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  var s = new THREE.Sprite(mat);
+  s.scale.set(size, size, 1);
+  return s;
+}
+
+// A flat additive quad lying on the asphalt, for beam splashes and
+// light pools. The radial texture stretched over the plane fades the
+// edges to nothing, so there is no hard rectangle on the road.
+function groundGlow(color, w, d) {
+  var mat = new THREE.MeshBasicMaterial({
+    map: glowTexture(), color: color, transparent: true, opacity: 0.4,
+    blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  var m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), mat);
+  m.rotation.x = -Math.PI / 2;
+  m.renderOrder = 1;
+  return m;
+}
+
 // ---- cars --------------------------------------------------------
 
 // Traffic palette: the same street colours the 2D roster drives,
@@ -132,6 +186,20 @@ function buildCar(color, detailed) {
   group.add(body);
   group.add(contactShadow(2.55, 1.25, 0.25));
 
+  // Beam splash + light pool on the road ahead, in the group (not
+  // the leaning body) so they stay glued to the asphalt. The splash
+  // is a long faint-blue ellipse stretching ~10 m forward from the
+  // nose; the pool is a shorter, brighter ellipse under the beam's
+  // near end — the headlights' answer to the street-lamp pools.
+  // Both sit just above the contact shadow (y 0.02) so they never
+  // z-fight it, and both are driven by applyLampLevels below.
+  var beam = groundGlow(0xaac8ff, 10.5, 3.4);
+  beam.position.set(2.3 + 5.2, 0.04, 0);
+  group.add(beam);
+  var pool = groundGlow(0xcfe0ff, 7.0, 4.6);
+  pool.position.set(2.3 + 3.2, 0.05, 0);
+  group.add(pool);
+
   var base = new THREE.Color(color);
   var bodyMat = paint(color, 0.35, 0.6);
   var skirtMat = paint(base.clone().multiplyScalar(0.55).getHex(), 0.5, 0.4);
@@ -189,6 +257,25 @@ function buildCar(color, detailed) {
   body.add(box(0.06, 0.16, 0.42, tailMat, -2.31, 0.62, -0.62));
   // Full-width rear light bar joining the taillights.
   body.add(box(0.05, 0.10, 1.5, tailMat, -2.32, 0.62, 0));
+  // Lamp glow: near-white sprites on the headlights, red sprites on
+  // the taillights, sitting just proud of the lamp faces. Sprites
+  // face the camera, so the lamps bloom from the front, the side,
+  // and the rear three-quarter chase view alike. Opacity is driven
+  // by applyLampLevels below; the lenses themselves are also pushed
+  // past emissive 1 so they read as lit, not painted.
+  headMat.emissiveIntensity = 2.0;
+  var headGlowL = glowSprite(0xd8ecff, 1.15);
+  headGlowL.position.set(2.38, 0.62, 0.62);
+  body.add(headGlowL);
+  var headGlowR = glowSprite(0xd8ecff, 1.15);
+  headGlowR.position.set(2.38, 0.62, -0.62);
+  body.add(headGlowR);
+  var tailGlowL = glowSprite(0xff2a1e, 0.95);
+  tailGlowL.position.set(-2.38, 0.62, 0.62);
+  body.add(tailGlowL);
+  var tailGlowR = glowSprite(0xff2a1e, 0.95);
+  tailGlowR.position.set(-2.38, 0.62, -0.62);
+  body.add(tailGlowR);
   // Rear diffuser valance with fins, twin chrome exhausts, and a
   // licence plate — the whole rear face, not a flat red slab.
   body.add(box(0.10, 0.14, 1.7, darkMat(), -2.30, 0.20, 0));
@@ -303,14 +390,57 @@ function buildCar(color, detailed) {
     pitch += (targetPitch - pitch) * k;
     body.rotation.x = roll;
     body.rotation.z = pitch;
+    // Brake flare: hard deceleration flares the taillight glow, so
+    // a car slowing ahead of the hero reads as braking. Smoothed
+    // with the same spring constant as the suspension lean.
+    var targetBrake = accel < -3 ? 1 : 0;
+    brakeF += (targetBrake - brakeF) * k;
+    if (Math.abs(brakeF - targetBrake) < 0.02) brakeF = targetBrake;
+    applyLampLevels();
   };
 
-  group.userData.setLights = function (on) {
+  // Light levels. nightF is 0 by day (lamps are lenses only) and 1
+  // at full night; it scales the beam, the pool and the glow. It
+  // defaults to 0.7 — dusk — because the frozen night shot never
+  // calls setLights or setNightness, so the build-time level is what
+  // the screenshot shows; live callers can dial it per frame with
+  // setNightness. brakeF is the brake flare, 0..1, smoothed in
+  // update() from hard deceleration and settable via setBrake.
+  var nightF = 0.7;
+  var lightsOn = true;
+  var brakeF = 0;
+  function applyLampLevels() {
+    var nf = lightsOn ? nightF : 0;
+    headMat.emissiveIntensity = lightsOn ? 1.2 + 1.6 * nightF : 0.9;
+    tailMat.emissiveIntensity = 1.5 + brakeF * 1.5;
+    headGlowL.material.opacity = 0.15 + 0.75 * nf;
+    headGlowR.material.opacity = 0.15 + 0.75 * nf;
+    tailGlowL.material.opacity = 0.3 + 0.5 * nf + brakeF * 0.35;
+    tailGlowR.material.opacity = 0.3 + 0.5 * nf + brakeF * 0.35;
+    beam.material.opacity = 0.3 * nf;
+    pool.material.opacity = 0.55 * nf;
     for (var i = 0; i < cones.length; i++) {
-      cones[i].material.opacity = on ? 0.18 : 0.07;
+      cones[i].material.opacity = lightsOn ? 0.07 + 0.11 * nightF : 0.07;
     }
-    headMat.emissiveIntensity = on ? 1.6 : 0.9;
+  }
+
+  group.userData.setLights = function (on, night) {
+    lightsOn = !!on;
+    if (typeof night === 'number') nightF = Math.max(0, Math.min(1, night));
+    applyLampLevels();
   };
+
+  group.userData.setNightness = function (v) {
+    if (typeof v === 'number') nightF = Math.max(0, Math.min(1, v));
+    applyLampLevels();
+  };
+
+  group.userData.setBrake = function (on) {
+    brakeF = on ? 1 : 0;
+    applyLampLevels();
+  };
+
+  applyLampLevels();
 
   if (detailed) {
     var damaged = new THREE.Color(0x4a3a32);
