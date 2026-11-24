@@ -961,6 +961,91 @@ function syncWorldMeshes(dt) {
 // A/D yaw, Space climb, C sink, only while boarded.
 // ---------------------------------------------------------------------
 let driveOdo = 0;
+
+// On-foot collision (r7). The player used to be a point that only
+// world.isSolid saw: buildings blocked, but traffic cars, lamps,
+// poles and trees had no test at all, so the player walked straight
+// through (and visually on top of) parked cars. The player now has
+// a 0.5 m radius and is solid against:
+//   - buildings: world.isSolid, tested at the centre plus four rim
+//     samples so the body stops at the wall instead of clipping in;
+//   - cars: live oriented boxes off traffic + the hero car + police
+//     cars (mopeds slimmer), read fresh every step — moving cars
+//     included, so a car can never be walked through;
+//   - the landed Gull: fuselage + tail only (the rotor disc is
+//     2.8 m up, the player walks under it);
+//   - lamps / signal poles / palms / beach umbrellas: small circles
+//     from the world's exported spot lists, built once (static).
+// Movement stays axis-separated, so a blocked axis slides along the
+// obstacle instead of freezing the player. If the player is already
+// inside an obstacle — a moving car drove into them, or an exit
+// spawn landed on a footprint — the step is let through, so they can
+// always walk back out instead of getting stuck.
+const PLAYER_RADIUS = 0.5;
+const CAR_HALF_LEN = 2.3; // traffic-car body is 4.6 m long (vehicles3d)
+const CAR_HALF_WID = 1.0; // ... and 2.0 m wide
+const MOPED_HALF_LEN = 1.1;
+const MOPED_HALF_WID = 0.45;
+const GULL_HALF_LEN = 3.2; // landed Gull: cabin + tail boom
+const GULL_HALF_WID = 1.2;
+let propObstacles = null; // [{ x, z, r }] — lamps, poles, palms, umbrellas
+function buildPropObstacles() {
+  if (propObstacles) return propObstacles;
+  const list = [];
+  const add = function (x, z, r) {
+    if (typeof x === 'number' && typeof z === 'number' && isFinite(x) && isFinite(z)) list.push({ x: x, z: z, r: r });
+  };
+  // Every street lamp (junction + mid-block, world.lampSpots).
+  for (const s of world.lampSpots || []) add(s[0], s[1], 0.9);
+  // Traffic-light poles stand on the same junction corners: the light
+  // record carries the head group, whose position is the pole.
+  for (const tl of world.trafficLights || []) {
+    if (tl.group && tl.group.position) add(tl.group.position.x, tl.group.position.z, 0.9);
+  }
+  for (const s of world.palms || []) add(s[0], s[1], 1.1);
+  for (const s of world.umbrellas || []) add(s[0], s[1], 0.8);
+  propObstacles = list;
+  return list;
+}
+function carBlocksAt(car, x, z) {
+  if (!car || typeof car.x !== 'number' || typeof car.z !== 'number') return false;
+  const hl = car.moped ? MOPED_HALF_LEN : CAR_HALF_LEN;
+  const hw = car.moped ? MOPED_HALF_WID : CAR_HALF_WID;
+  const dx = x - car.x, dz = z - car.z;
+  const ca = Math.cos(car.angle || 0), sa = Math.sin(car.angle || 0);
+  const along = dx * ca + dz * sa;
+  const perp = -dx * sa + dz * ca;
+  return Math.abs(along) < hl + PLAYER_RADIUS && Math.abs(perp) < hw + PLAYER_RADIUS;
+}
+function footBlockedAt(x, z) {
+  // Buildings, with the player radius.
+  if (world.isSolid(x, z) || world.isSolid(x + PLAYER_RADIUS, z) || world.isSolid(x - PLAYER_RADIUS, z) ||
+      world.isSolid(x, z + PLAYER_RADIUS) || world.isSolid(x, z - PLAYER_RADIUS)) return true;
+  // Cars: traffic (parked + moving), the hero car, police cars.
+  const cars = (traffic && traffic.cars) || S.cars || [];
+  for (const car of cars) if (carBlocksAt(car, x, z)) return true;
+  if (carBlocksAt(heroCar, x, z)) return true;
+  if (S.police) {
+    for (const u of S.police.units || []) {
+      if (u.ped) continue;
+      if (carBlocksAt(u.car || u, x, z)) return true;
+    }
+  }
+  // The landed Gull.
+  if (gull && gull.landed && (gull.altitude || 0) <= 0.5) {
+    const dx = x - gull.x, dz = z - gull.z;
+    const ca = Math.cos(gull.angle || 0), sa = Math.sin(gull.angle || 0);
+    const along = dx * ca + dz * sa;
+    const perp = -dx * sa + dz * ca;
+    if (Math.abs(along) < GULL_HALF_LEN + PLAYER_RADIUS && Math.abs(perp) < GULL_HALF_WID + PLAYER_RADIUS) return true;
+  }
+  // Lamps / poles / palms / umbrellas.
+  for (const o of buildPropObstacles()) {
+    const dx = x - o.x, dz = z - o.z, rr = o.r + PLAYER_RADIUS;
+    if (dx * dx + dz * dz < rr * rr) return true;
+  }
+  return false;
+}
 function stepOnFoot(dt) {
   const p = S.player;
   const camDir = new THREE.Vector3(p.x - camera.position.x, 0, p.z - camera.position.z);
@@ -980,8 +1065,12 @@ function stepOnFoot(dt) {
     mx /= len; mz /= len;
     const nx = p.x + mx * walkSpeed * dt;
     const nz = p.z + mz * walkSpeed * dt;
-    if (!world.isSolid(nx, p.z)) p.x = nx;
-    if (!world.isSolid(p.x, nz)) p.z = nz;
+    // Axis-separated, so a blocked axis slides along the obstacle.
+    // Already inside (a car drove into the player, or an exit spawn
+    // landed on a footprint)? Let the step through — the way out.
+    const inside = footBlockedAt(p.x, p.z);
+    if (inside || !footBlockedAt(nx, p.z)) p.x = nx;
+    if (inside || !footBlockedAt(p.x, nz)) p.z = nz;
     if (!p.aiming) p.angle = Math.atan2(mz, mx);
     p.x = Math.max(CFG3D.OCEAN_X + 40, Math.min(CFG3D.CITY_HALF, p.x));
     p.z = Math.max(-CFG3D.CITY_HALF, Math.min(CFG3D.CITY_HALF, p.z));

@@ -3,7 +3,10 @@
 // The city feels empty without them, so this file keeps the streets
 // busy: two dozen-plus cars cruising the road grid, parked rows along
 // the beach road, mopeds weaving through, and pedestrians in groups on
-// the sidewalks, the beach and the market aisles. Cars stick to their
+// the sidewalks, the beach and the market aisles. Sidewalk walkers
+// stay on the sidewalk strip (9 m off the centreline) and cross a
+// road only on a zebra at one of the 22 signalled junctions, waiting
+// at the kerb for the walk signal — there is no jaywalking. Cars stick to their
 // (correct, right-hand) side of the road, stop at red lights, brake
 // and honk behind the player, and steer around a blocked car instead
 // of sitting on the horn forever. Pedestrians scatter when shots ring
@@ -22,8 +25,15 @@
 // synced every frame (position + rotation.y = -angle, model faces +X).
 //
 // Density (live street, after ensureLife):
-//   moving cars 28 (26 cars + 2 mopeds), parked rows ~20,
-//   pedestrians 62+ (14 beach, 16 market, 32 sidewalk).
+//   moving cars 34 (30 cars + 4 mopeds), parked rows ~117,
+//   pedestrians 86+ (18 beach, 24 market, 44 sidewalk).
+//
+// The lights live in trafficlights3d.js: the 14 s cycle, the
+// per-junction phase, and the visible heads are one source of truth
+// with the car logic here — a lamp and the cars under it read the
+// same phase, so they can never disagree. Cars stop only where a
+// signal stands (the 64); minor 200 m cross-streets are uncontrolled
+// and traffic flows through, GTA-style.
 //
 // createTraffic(world, vehicles) returns a system with:
 //   update(dt, player, events) — events: { time, gunfire: {x,z}|null,
@@ -34,13 +44,110 @@
 // Car records live in sys.cars, people in sys.peds.
 
 import { CFG3D as CFG } from './config3d.js';
+import { directionState, pedState, createTrafficLights, STOP_GAP, SIGNAL_JUNCTIONS } from './trafficlights3d.js';
 
-const MOVERS_WANTED = 28;
-const MOPEDS_WANTED = 2;
-const BEACH_PEDS = 14;
-const MARKET_PEDS = 16;
-const SIDEWALK_PEDS = 32;
+const MOVERS_WANTED = 34;
+const MOPEDS_WANTED = 4;
+const BEACH_PEDS = 18;
+const MARKET_PEDS = 24;
+const SIDEWALK_PEDS = 44;
 const LANE_OFFSET = 3.5; // metres off the centreline, right-hand lane
+
+// ---- sidewalk routing (pedestrians stay off the car lanes) --------------
+// Geometry, read off CFG + the painted markings in trafficlights3d.js:
+// a road is ROAD_WIDTH (14 m) wide, so its kerb sits 7 m from the
+// centreline; the sidewalk strip beside it is SIDEWALK (4 m) wide, so
+// its centre is 9 m out. The zebra bands the lights module paints sit
+// 8–11 m out from a junction centre (band centre 9.5 m) — i.e. a ped
+// walking down the middle of the sidewalk is already ON the zebra
+// when it crosses a junction, and a ped crossing its own road at
+// 9.5 m out from the junction walks straight down the painted bars.
+// Sidewalk walkers therefore never need the lanes at all: they walk
+// the 9 m line, cross the cross-road on the zebra at a signalled
+// junction (waiting at the kerb for the walk signal), cross their own
+// road only on the zebra at a signalled junction, and otherwise turn
+// the corner onto the cross-road's near sidewalk or turn back. There
+// is no jaywalking: every crossing is on a zebra at one of the 22
+// signalled junctions. Beach strollers and market shoppers keep their
+// old behaviour — they are not on roads.
+const SWALK_OFF = (CFG.ROAD_WIDTH || 14) / 2 + (CFG.SIDEWALK || 4) / 2; // 9 m
+const ZEBRA_OFF = 9.5; // zebra band centre out from a junction centre
+const BLOCK = CFG.BLOCK || 200;
+const CITY_HALF = CFG.CITY_HALF || 1400;
+
+const SIGNAL_KEYS = new Set(SIGNAL_JUNCTIONS.map((j) => j.x + ',' + j.z));
+function isSignalledJunction(jx, jz) { return SIGNAL_KEYS.has(jx + ',' + jz); }
+
+// The two fenced freeways carry no sidewalks: peds never walk along
+// them and never turn onto them.
+function isWalkableRoad(axis, line) {
+  if (axis === 'x' && line === (CFG.HIGHWAY_NORTH_Z ?? -1200)) return false;
+  if (axis === 'z' && line === (CFG.HIGHWAY_EAST_X ?? 1200)) return false;
+  return true;
+}
+
+function nearestLine(v) { return Math.round(v / BLOCK) * BLOCK; }
+
+function nextJunction(parallel, dir) {
+  const k = dir > 0 ? Math.floor(parallel / BLOCK) + 1 : Math.ceil(parallel / BLOCK) - 1;
+  return k * BLOCK;
+}
+
+// Point on a sidewalk route `sw` at `parallel` metres along the road.
+function sidewalkPoint(sw, parallel) {
+  return sw.axis === 'x'
+    ? { x: parallel, z: sw.line + sw.side * SWALK_OFF }
+    : { x: sw.line + sw.side * SWALK_OFF, z: parallel };
+}
+
+// A parallel coordinate kept at least 15 m from any junction, so a ped
+// never spawns (or is sent) already inside a crossing.
+function clampOffJunction(parallel) {
+  const nj = nearestLine(parallel);
+  if (Math.abs(parallel - nj) < 15) parallel = parallel >= nj ? nj + 30 : nj - 30;
+  return clamp(parallel, -CITY_HALF + 20, CITY_HALF - 20);
+}
+
+// The nearest sidewalk to where a ped stands (after fleeing or
+// fighting knocked it off its strip): the nearer road, the nearer side
+// of it, facing along it. The walk back runs from outside the kerb
+// toward the strip, so it never enters a lane.
+function nearestSidewalk(ped) {
+  const nx = nearestLine(ped.x);
+  const nz = nearestLine(ped.z);
+  const dx = Math.abs(ped.x - nx);
+  const dz = Math.abs(ped.z - nz);
+  let axis = dx <= dz ? 'z' : 'x';
+  let line = axis === 'z' ? nx : nz;
+  if (!isWalkableRoad(axis, line)) {
+    axis = axis === 'z' ? 'x' : 'z';
+    line = axis === 'z' ? nx : nz;
+    if (!isWalkableRoad(axis, line)) line += line > 0 ? -BLOCK : BLOCK;
+  }
+  const perp = axis === 'x' ? ped.z : ped.x;
+  const heading = axis === 'x' ? Math.cos(ped.angle) : Math.sin(ped.angle);
+  return { axis, line, side: perp >= line ? 1 : -1, dir: heading >= 0 ? 1 : -1 };
+}
+
+// Build a sidewalk route from a road spot (world randomRoadSpot or the
+// grid fallback): which road the spot sits on, which side of it, and
+// which way along it — plus a start point on the 9 m strip, clear of
+// any junction. The spot's on-centreline coordinate says which road
+// it is (world3d spots carry no angle). A highway line is shifted one
+// block toward the centre.
+function sidewalkFromSpot(spot, rng) {
+  const r = rng || Math.random;
+  const dx = Math.abs(spot.x - nearestLine(spot.x));
+  const dz = Math.abs(spot.z - nearestLine(spot.z));
+  let axis, line, parallel;
+  if (dx <= dz) { axis = 'z'; line = nearestLine(spot.x); parallel = spot.z; }
+  else { axis = 'x'; line = nearestLine(spot.z); parallel = spot.x; }
+  if (!isWalkableRoad(axis, line)) line += line > 0 ? -BLOCK : BLOCK;
+  parallel = clampOffJunction(clamp(parallel, -CITY_HALF + 20, CITY_HALF - 20));
+  const sw = { axis, line, side: r() < 0.5 ? -1 : 1, dir: r() < 0.5 ? -1 : 1 };
+  const at = sidewalkPoint(sw, parallel);
+  return { sw, x: at.x, z: at.z };
+}
 const SKINS = ['#e8b48f', '#c98d64', '#8a5a3b', '#f0c8a0', '#a06a45'];
 const SHIRTS = ['#3d7ea6', '#c94f3d', '#e8c53a', '#4a6b4f', '#e86a92', '#7a5a9e', '#2e8b7a', '#d97b2b'];
 const CAR_MODELS = ['vela', 'brisa', 'faro', 'tiburon', 'monzon', 'playa', 'corriente', 'duna', 'arena', 'costa', 'palmera', 'luna', 'norte', 'sierra'];
@@ -126,6 +233,9 @@ function makeWorld(world) {
     // below reads them so our reds match the 3D light meshes.
     junctions: Array.isArray(w.junctions) ? w.junctions : null,
     trafficLights: Array.isArray(w.trafficLights) ? w.trafficLights : null,
+    // The scene group the light meshes hang from (trafficlights3d
+    // builds into it); absent in stubs, where no meshes are built.
+    group: w.group || null,
   };
 }
 
@@ -168,6 +278,11 @@ export function createTraffic(world, vehicles) {
     time: 0,
     rngSeed: 31,
   };
+  // The visible lights: built into the world group when there is one
+  // (a no-op stub in tests). Driven every frame from update(), on the
+  // same clock the cars read.
+  const lights = createTrafficLights(world);
+  sys.lights = lights;
 
   function rngFor(salt) {
     return mulberry32((salt + Math.floor(sys.time)) >>> 0);
@@ -237,12 +352,14 @@ export function createTraffic(world, vehicles) {
   }
 
   // A parked row: cars nose-to-tail along the east kerb of the avenue
-  // at avenueX, from z0 to z1, ~31 m apart, facing along the road.
-  // Returns how many cars were parked.
-  function spawnParkedRow(player, rng, avenueX, z0, z1) {
+  // at avenueX, from z0 to z1, `step` m apart (tighter on the beach
+  // road, where kerbside parking is the street's furniture), facing
+  // along the road. Returns how many cars were parked.
+  function spawnParkedRow(player, rng, avenueX, z0, z1, step) {
     const r = rng || rngFor(sys.rngSeed + 13);
+    const gap = step || 31;
     let n = 0;
-    for (let z = z0; z <= z1; z += 31) {
+    for (let z = z0; z <= z1; z += gap) {
       const model = CAR_MODELS[Math.floor(r() * CAR_MODELS.length)];
       const car = makeCarRecord(model, avenueX + 9, z, -Math.PI / 2, { parkedRow: true });
       sys.cars.push(car);
@@ -264,9 +381,22 @@ export function createTraffic(world, vehicles) {
       mode: o.mode || 'walk',
       fleeT: 0,
       duckT: 0,
+      chatT: 0,
       anchor: o.anchor || null,
       beach: !!o.beach,
       fighter: false,
+      // Sidewalk route (sidewalk walkers only; beach/market peds leave
+      // it null and keep their old behaviour): the road the ped walks
+      // beside (axis 'x' = east-west road, line = its centreline),
+      // which side of it, and which way along it. wp is the current
+      // waypoint, waiting is a kerb wait for a walk signal, and
+      // noStraightJ is the junction just crossed over at (straight
+      // crossings there wait or turn back — never a second crossing
+      // on a stale signal).
+      sw: null,
+      wp: null,
+      waiting: null,
+      noStraightJ: null,
     };
   }
 
@@ -288,8 +418,11 @@ export function createTraffic(world, vehicles) {
         if (d < 550) { spot = s; break; }
         if (d < bestD) { bestD = d; spot = s; }
       }
-      const side = r() < 0.5 ? -1 : 1;
-      ped = makePedRecord(spot.x + side * (8 + r() * 4), spot.z + (r() - 0.5) * 25, r, {});
+      // Sidewalk walkers start ON the sidewalk strip (9 m off the
+      // centreline), never on the lanes.
+      const built = sidewalkFromSpot(spot, r);
+      ped = makePedRecord(built.x, built.z, r, {});
+      ped.sw = built.sw;
     }
     ped.speed = ped.base;
     sys.peds.push(ped);
@@ -303,15 +436,46 @@ export function createTraffic(world, vehicles) {
     const r = rng || rngFor(sys.rngSeed + 29);
     const made = [];
     for (let i = 0; i < n; i++) {
-      const ped = makePedRecord(cx + (r() - 0.5) * 35, cz + (r() - 0.5) * 25, r, {
-        mode: kind === 'beach' ? 'beach' : 'walk',
-        beach: kind === 'beach',
-        base: kind === 'beach' ? 0.7 + r() * 0.8 : 1 + r() * 1.4,
-        anchor: { x: cx, z: cz },
-      });
+      let ped;
+      if (kind === 'sidewalk') {
+        // Each walker gets its own sidewalk route: a road through the
+        // anchor junction, a side, a direction, and a start spread
+        // along the block — always on the 9 m strip, never on a lane.
+        const axis = r() < 0.5 ? 'x' : 'z';
+        let line = axis === 'x' ? nearestLine(cz) : nearestLine(cx);
+        if (!isWalkableRoad(axis, line)) line += line > 0 ? -BLOCK : BLOCK;
+        const anchorParallel = axis === 'x' ? cx : cz;
+        const parallel = clampOffJunction(clamp(anchorParallel + (r() - 0.5) * 160, -CITY_HALF + 20, CITY_HALF - 20));
+        const sw = { axis, line, side: r() < 0.5 ? -1 : 1, dir: r() < 0.5 ? -1 : 1 };
+        const at = sidewalkPoint(sw, parallel);
+        ped = makePedRecord(at.x, at.z, r, {
+          mode: 'walk',
+          base: 1 + r() * 1.4,
+          anchor: { x: cx, z: cz },
+        });
+        ped.sw = sw;
+      } else {
+        ped = makePedRecord(cx + (r() - 0.5) * 35, cz + (r() - 0.5) * 25, r, {
+          mode: kind === 'beach' ? 'beach' : 'walk',
+          beach: kind === 'beach',
+          base: kind === 'beach' ? 0.7 + r() * 0.8 : 1 + r() * 1.4,
+          anchor: { x: cx, z: cz },
+        });
+      }
       ped.speed = ped.base;
       sys.peds.push(ped);
       made.push(ped);
+    }
+    // A stopped pair reads as life where a lone walker reads as a
+    // prop: in market and sidewalk groups, half the time the first
+    // two stand facing each other, chatting for 20-40 s, then move on.
+    if ((kind === 'market' || kind === 'sidewalk') && made.length >= 2 && r() < 0.5) {
+      const a = made[0], b = made[1];
+      a.mode = 'chat'; b.mode = 'chat';
+      a.chatT = 20 + r() * 20; b.chatT = a.chatT;
+      a.speed = 0; b.speed = 0;
+      a.angle = Math.atan2(b.z - a.z, b.x - a.x);
+      b.angle = Math.atan2(a.z - b.z, a.x - b.x);
     }
     return made;
   }
@@ -332,76 +496,78 @@ export function createTraffic(world, vehicles) {
     while (moving < MOVERS_WANTED) { spawnMover(player, rng); moving++; }
     // Parked rows: a full kerb along the beach road (west edge) and a
     // second row on the Citrus Lane avenue, so the streets read
-    // parked-up instead of empty.
-    spawnParkedRow(player, rng, -1400, -1000, 1000);
-    spawnParkedRow(player, rng, -400, -400, 400);
+    // parked-up instead of empty. The beach row parks tighter (24 m),
+    // the way a busy kerb does.
+    spawnParkedRow(player, rng, -1400, -1000, 1000, 24);
+    spawnParkedRow(player, rng, -400, -500, 500);
     // Beachgoers on the sand, between the road and the water.
-    spawnPedGroup(player, rng, -1500, -600, 5, 'beach');
-    spawnPedGroup(player, rng, -1520, 200, 5, 'beach');
-    spawnPedGroup(player, rng, -1500, 900, 4, 'beach');
+    spawnPedGroup(player, rng, -1500, -600, 6, 'beach');
+    spawnPedGroup(player, rng, -1520, 200, 6, 'beach');
+    spawnPedGroup(player, rng, -1500, 900, 6, 'beach');
     // Market crowds in the Citrus Lane stall aisles.
-    spawnPedGroup(player, rng, -1000, -100, 6, 'market');
-    spawnPedGroup(player, rng, -600, 100, 5, 'market');
-    spawnPedGroup(player, rng, -1200, 200, 5, 'market');
+    spawnPedGroup(player, rng, -1000, -100, 8, 'market');
+    spawnPedGroup(player, rng, -600, 100, 8, 'market');
+    spawnPedGroup(player, rng, -1200, 200, 8, 'market');
     // Sidewalk groups along the roads, spread across the districts.
-    spawnPedGroup(player, rng, -200, -800, 8, 'sidewalk');
-    spawnPedGroup(player, rng, 600, -200, 8, 'sidewalk');
-    spawnPedGroup(player, rng, 1000, 800, 8, 'sidewalk');
-    spawnPedGroup(player, rng, 0, 1000, 8, 'sidewalk');
+    spawnPedGroup(player, rng, -200, -800, 11, 'sidewalk');
+    spawnPedGroup(player, rng, 600, -200, 11, 'sidewalk');
+    spawnPedGroup(player, rng, 1000, 800, 11, 'sidewalk');
+    spawnPedGroup(player, rng, 0, 1000, 11, 'sidewalk');
   }
 
-  // Traffic-light cycle, matching B1's world3d updateTrafficLights
-  // exactly so our reds agree with the 3D light meshes: north-south
-  // green for the first 45% of the cycle, east-west green for the
-  // rest; each junction is offset by (x + z) / 400 of a cycle.
-  // A car is "at" a junction when the next crossing is within 26 m
-  // ahead of it; it stops only when its own direction is red.
-  function lightIsRed(car) {
-    const cycle = CFG.TRAFFIC_LIGHT_CYCLE || 14;
+  // The junction ahead of this car: the next road-centreline crossing
+  // within 40 m, on the road the car is travelling. The travel axis
+  // follows the HEADING, not the road under the car: near a crossing
+  // the road under the car can be the crossing road, which used to
+  // steer a car stopped at a red light back the way it came.
+  // Returns null when the car is not on a road or no crossing is near.
+  function junctionAhead(car) {
     const road = w.roadAt(car.x, car.z);
-    if (!road) return false;
+    if (!road) return null;
     const block = CFG.BLOCK || 200;
-    // The junction ahead: on an X-road (car travels east-west) the
-    // crossings sit on X centrelines; on a Z-road, on Z centrelines.
-    let jx = null;
-    let jz = null;
     const dirX = Math.cos(car.angle);
     const dirZ = Math.sin(car.angle);
     const lines = [];
     for (let k = -7; k <= 7; k++) lines.push(k * block);
-    if (road.axis === 'x') {
+    if (Math.abs(dirX) >= Math.abs(dirZ)) {
       let best = Infinity;
+      let jx = null;
       for (const a of lines) {
         const d = dirX < 0 ? car.x - a : dirX > 0 ? a - car.x : Infinity;
         if (d > 0 && d < best) { best = d; jx = a; }
       }
-      if (jx === null || best > 26) return false;
-      jz = Math.round(car.z / block) * block;
-    } else {
-      let best = Infinity;
-      for (const s of lines) {
-        const d = dirZ < 0 ? car.z - s : dirZ > 0 ? s - car.z : Infinity;
-        if (d > 0 && d < best) { best = d; jz = s; }
-      }
-      if (jz === null || best > 26) return false;
-      jx = Math.round(car.x / block) * block;
+      if (jx === null || best > 40) return null;
+      return { jx, jz: Math.round(car.z / block) * block, dist: best, axis: 'x' };
     }
-    // Junction offset: B1's recorded offset when we have the light,
-    // else B1's own formula (x + z) / 400.
-    let offset = (jx + jz) / 400;
-    if (w.trafficLights) {
-      for (const tl of w.trafficLights) {
-        if (Math.abs(tl.x - jx) < 1 && Math.abs(tl.z - jz) < 1 && typeof tl.offset === 'number') {
-          offset = tl.offset;
-          break;
-        }
-      }
+    let best = Infinity;
+    let jz = null;
+    for (const s of lines) {
+      const d = dirZ < 0 ? car.z - s : dirZ > 0 ? s - car.z : Infinity;
+      if (d > 0 && d < best) { best = d; jz = s; }
     }
-    const phase = (((sys.time + offset * cycle * 0.5) % cycle) + cycle) % cycle;
-    const nsGreen = phase < cycle * 0.45;
-    // Along-X travel is east-west: green when NOT nsGreen.
-    // Along-Z travel is north-south: green when nsGreen.
-    return road.axis === 'x' ? nsGreen : !nsGreen;
+    if (jz === null || best > 40) return null;
+    return { jx: Math.round(car.x / block) * block, jz, dist: best, axis: 'z' };
+  }
+
+  // The signal record for a junction, when the world built one there
+  // (the 64, every 400 m). Null at a minor 200 m cross-street.
+  function signalAt(jx, jz) {
+    if (!w.trafficLights) return null;
+    for (const tl of w.trafficLights) {
+      if (Math.abs(tl.x - jx) < 1 && Math.abs(tl.z - jz) < 1) return tl;
+    }
+    return null;
+  }
+
+  // Is this car facing a red (or yellow) light? Only at a crossing
+  // that actually has a signal: a minor cross-street has no light to
+  // obey, so traffic flows through it. The state comes from the same
+  // phase function the visible heads display, so the two agree.
+  function lightIsRed(car) {
+    const j = junctionAhead(car);
+    if (!j || j.dist > 26) return false;
+    if (w.trafficLights && !signalAt(j.jx, j.jz)) return false;
+    return directionState(j.jx, j.jz, j.axis, sys.time) !== 'green';
   }
 
   // What is directly ahead of this car, inside its lane: a moving car
@@ -435,25 +601,28 @@ export function createTraffic(world, vehicles) {
     return null;
   }
 
-  // Right-hand lane target: the nearest road centreline point ahead,
-  // offset to the right of the direction of travel. On a road along X
-  // heading east (+X), right is +Z (south); heading west, right is -Z.
-  // On a road along Z heading south (+Z), right is -X; heading north,
-  // right is +X.
+  // Right-hand lane target: the lane on the car's OWN road, picked by
+  // its heading. The old version read the road 30 m ahead, which near
+  // a junction is the CROSSING road — and a car stopped there got a
+  // target behind it and turned around. A car far from any centreline
+  // (beach road, a lot) just holds its heading.
   function laneTarget(car) {
-    const snap = w.nearestRoadPoint(car.x, car.z);
     const aheadX = car.x + Math.cos(car.angle) * 30;
     const aheadZ = car.z + Math.sin(car.angle) * 30;
-    const road = w.roadAt(aheadX, aheadZ) || w.roadAt(car.x, car.z);
-    if (!road) return { x: aheadX, z: aheadZ };
+    const block = CFG.BLOCK || 200;
+    const half = (CFG.ROAD_WIDTH || 14) / 2 + (CFG.SIDEWALK || 4) + 6;
     const off = car.goAroundT > 0 ? -LANE_OFFSET * (car.goAroundSide || 1) : LANE_OFFSET;
-    if (road.axis === 'x') {
-      // Road runs east-west; the car's lane sits off the Z centreline.
+    if (Math.abs(Math.cos(car.angle)) >= Math.abs(Math.sin(car.angle))) {
+      // East-west travel: the lane sits off the Z centreline.
+      const line = Math.round(car.z / block) * block;
+      if (Math.abs(car.z - line) > half) return { x: aheadX, z: aheadZ };
       const dir = Math.cos(car.angle) >= 0 ? 1 : -1;
-      return { x: aheadX, z: snap.z + dir * off };
+      return { x: aheadX, z: line + dir * off };
     }
+    const line = Math.round(car.x / block) * block;
+    if (Math.abs(car.x - line) > half) return { x: aheadX, z: aheadZ };
     const dir = Math.sin(car.angle) >= 0 ? 1 : -1;
-    return { x: snap.x - dir * off, z: aheadZ };
+    return { x: line - dir * off, z: aheadZ };
   }
 
   function updateMover(player, car, dt) {
@@ -461,13 +630,47 @@ export function createTraffic(world, vehicles) {
     let want = car.cruise;
     // Traffic pulls over and stops when a chase rolls past.
     if ((player.wanted || 0) >= 3 && dPlayer < 190) want = 0;
-    // Gunfire nearby makes drivers floor it away from the noise.
+    // Gunfire nearby makes drivers floor it away from the noise —
+    // and a fleeing driver runs the light, so the red handling below
+    // is skipped while fleeing.
     const shot = sys.lastShotAt;
-    if (shot && sys.time - shot.t < 2.5 && dist2(car.x, car.z, shot.x, shot.z) < 250) {
+    const fleeing = !!(shot && sys.time - shot.t < 2.5 && dist2(car.x, car.z, shot.x, shot.z) < 250);
+    if (fleeing) {
       want = car.cruise * 1.7;
     }
-    // Red light ahead: stop at the line, like the rest of the city.
-    if (lightIsRed(car)) want = 0;
+    // Red light ahead: ease down to the stop line (STOP_GAP before
+    // the junction centre) and wait there until OUR junction turns
+    // green. The latch (car.redJunction) is what keeps the car
+    // stopped: without it the car stops outside the 26 m trigger,
+    // the light "clears", and it creeps forward and stops again.
+    // A car already rolling past the line clears the junction instead
+    // of stopping in it.
+    if (!fleeing) {
+      const j = junctionAhead(car);
+      let redHere = false;
+      if (j && (!w.trafficLights || signalAt(j.jx, j.jz))) {
+        const state = directionState(j.jx, j.jz, j.axis, sys.time);
+        if (state !== 'green') {
+          redHere = true;
+          const stopDist = j.dist - STOP_GAP;
+          if (stopDist > 0.5) {
+            want = Math.min(want, Math.max(0, stopDist * 0.7));
+            if (stopDist < 3) car.redJunction = { jx: j.jx, jz: j.jz, axis: j.axis };
+          } else if (car.speed < 0.5 || car.redJunction) {
+            want = 0;
+            car.redJunction = { jx: j.jx, jz: j.jz, axis: j.axis };
+          }
+        }
+      }
+      if (!redHere && car.redJunction) {
+        // Was waiting: release only when our own junction turns green.
+        if (directionState(car.redJunction.jx, car.redJunction.jz, car.redJunction.axis, sys.time) === 'green') {
+          car.redJunction = null;
+        } else {
+          want = 0;
+        }
+      }
+    }
     // Something in our lane: brake. Behind the player, wait a beat,
     // honk, then steer around instead of sitting there forever.
     const ahead = carAhead(player, car);
@@ -476,7 +679,9 @@ export function createTraffic(world, vehicles) {
       if (ahead.kind === 'player') {
         car.playerBlock = (car.playerBlock || 0) + dt;
         if (car.playerBlock > 1.5) car.honk = true;
-        if (car.playerBlock > 2.2 && !car.goAroundT) {
+        // No going around while waiting at a red: the car stays in
+        // its lane behind the player until the light turns green.
+        if (car.playerBlock > 2.2 && !car.goAroundT && !car.redJunction) {
           car.goAroundT = 2.6;
           car.goAroundSide = Math.random() < 0.5 ? 1 : -1;
         }
@@ -488,13 +693,16 @@ export function createTraffic(world, vehicles) {
       car.playerBlock = 0;
       car.honk = false;
     }
-    // Committed to the pass: pull out half a lane and go around.
+    // Committed to the pass: pull out half a lane and go around —
+    // unless the light ahead is red, in which case the pass waits.
     if (car.goAroundT > 0) {
       car.goAroundT -= dt;
-      want = car.cruise * 0.6;
+      if (!car.redJunction) want = car.cruise * 0.6;
     }
     // Blocked ahead: wait a beat, then swing onto the crossing road.
-    if (w.isSolid(car.x + Math.cos(car.angle) * 14, car.z + Math.sin(car.angle) * 14)) {
+    // Not while waiting at a red — a car at the line is waiting, not
+    // stuck, and must not turn itself into the junction.
+    if (!car.redJunction && w.isSolid(car.x + Math.cos(car.angle) * 14, car.z + Math.sin(car.angle) * 14)) {
       want = 0;
       car.blocked += dt;
       if (car.blocked > 1.4) {
@@ -555,6 +763,161 @@ export function createTraffic(world, vehicles) {
     }
   }
 
+  // Sidewalk-only walking for a ped with a route (ped.sw). The ped
+  // walks the 9 m strip toward its next junction's approach point
+  // (9.5 m out — the zebra line); there it either crosses on the zebra
+  // (signalled junction + walk signal, waiting at the kerb otherwise),
+  // crosses its own road on the zebra (same rule, other axis), turns
+  // the corner onto the cross-road's near sidewalk, or turns back. A
+  // ped knocked off its strip (fleeing, fighting) is re-snapped to
+  // the nearest sidewalk first. Sets ped.angle / ped.speed; the shared
+  // movement step at the end of updatePed does the stepping.
+  function updateSidewalkPed(ped) {
+    let sw = ped.sw;
+    const hasSignals = !!w.trafficLights;
+
+    // Waiting at a kerb: hold until the walk signal, unless the ped
+    // was knocked away from the junction meanwhile (gunfire) — then
+    // drop the wait and re-route from wherever it stands.
+    if (ped.waiting) {
+      const wt = ped.waiting;
+      if (dist2(ped.x, ped.z, wt.target.x, wt.target.z) > 25) {
+        ped.waiting = null;
+        ped.wp = null;
+      } else if (pedState(wt.jx, wt.jz, wt.axis, sys.time) === 'walk') {
+        ped.wp = wt.target;
+        ped.waiting = null;
+      } else {
+        ped.speed = 0;
+        ped.angle = Math.atan2(wt.target.z - ped.z, wt.target.x - ped.x);
+        return;
+      }
+    }
+
+    // Off the strip (fled, fought): snap to the nearest sidewalk and
+    // walk back to it.
+    const perpNow = sw.axis === 'x' ? ped.z : ped.x;
+    if (Math.abs(perpNow - (sw.line + sw.side * SWALK_OFF)) > 1.5) {
+      ped.sw = nearestSidewalk(ped);
+      ped.wp = null;
+      sw = ped.sw;
+    }
+
+    // Arrived at the current waypoint? Snap to it exactly, apply its
+    // effect, then (for an approach point) decide the junction.
+    if (ped.wp && dist2(ped.x, ped.z, ped.wp.x, ped.wp.z) < 1.2) {
+      const wp = ped.wp;
+      ped.x = wp.x;
+      ped.z = wp.z;
+      ped.wp = null;
+      if (wp.kind === 'cross') {
+        if (wp.sideFlip) {
+          sw.side = -sw.side;
+          ped.noStraightJ = sw.axis + ':' + sw.line + ':' + wp.j;
+        } else {
+          ped.noStraightJ = null;
+        }
+      } else if (wp.kind === 'along') {
+        const j = wp.j;
+        const jx = sw.axis === 'x' ? j : sw.line;
+        const jz = sw.axis === 'x' ? sw.line : j;
+        const crossAxis = sw.axis === 'x' ? 'z' : 'x';
+        const signalled = hasSignals && isSignalledJunction(jx, jz);
+        const key = sw.axis + ':' + sw.line + ':' + j;
+        const justCrossed = ped.noStraightJ === key;
+        if (ped.noStraightJ && !justCrossed) ped.noStraightJ = null;
+        const roll = Math.random();
+        const straightTarget = () => {
+          const far = sidewalkPoint(sw, j + sw.dir * ZEBRA_OFF);
+          return { x: far.x, z: far.z, kind: 'cross', jx, jz, axis: sw.axis, j };
+        };
+        const sideTarget = () => {
+          const across = sw.axis === 'x'
+            ? { x: j - sw.dir * ZEBRA_OFF, z: sw.line - sw.side * SWALK_OFF }
+            : { x: sw.line - sw.side * SWALK_OFF, z: j - sw.dir * ZEBRA_OFF };
+          return { x: across.x, z: across.z, kind: 'cross', jx, jz, axis: crossAxis, j, sideFlip: true };
+        };
+        const waitFor = (axis, target) => {
+          ped.waiting = { jx, jz, axis, target };
+          ped.speed = 0;
+        };
+        if (justCrossed) {
+          // Just crossed over at this junction: either wait and cross
+          // the cross-road, or turn back — no corner turn from the
+          // far side (it would mean crossing a road again).
+          if (roll < 0.5 && signalled) {
+            if (pedState(jx, jz, sw.axis, sys.time) === 'walk') ped.wp = straightTarget();
+            else waitFor(sw.axis, straightTarget());
+          } else {
+            sw.dir = -sw.dir;
+            ped.noStraightJ = null;
+          }
+        } else if (signalled && roll < 0.40) {
+          // Straight across the cross-road, on the zebra.
+          if (pedState(jx, jz, sw.axis, sys.time) === 'walk') ped.wp = straightTarget();
+          else waitFor(sw.axis, straightTarget());
+        } else if (signalled && roll < 0.58) {
+          // Across our own road, on the zebra at this junction.
+          if (pedState(jx, jz, crossAxis, sys.time) === 'walk') ped.wp = sideTarget();
+          else waitFor(crossAxis, sideTarget());
+        } else if (roll < 0.80) {
+          // Corner turn onto the cross-road's near sidewalk: the
+          // 0.5 m sidestep stays on the corner square, no lane
+          // involved. Never onto a freeway.
+          const ns = { axis: crossAxis, line: j, side: -sw.dir, dir: sw.side };
+          if (isWalkableRoad(ns.axis, ns.line)) {
+            ped.sw = ns;
+            sw = ns;
+            ped.noStraightJ = null;
+          } else {
+            sw.dir = -sw.dir;
+            ped.noStraightJ = null;
+          }
+        } else {
+          sw.dir = -sw.dir;
+          ped.noStraightJ = null;
+        }
+      }
+    }
+
+    // No waypoint: head for the next junction's approach point (the
+    // zebra line, 9.5 m out). Already past the kerb inside a junction
+    // (knocked there): committed — walk straight across on the zebra
+    // to the far kerb instead of waiting in the road. Past the last
+    // junction the road ends at the city edge, so turn back.
+    if (!ped.wp && !ped.waiting) {
+      const parallel = sw.axis === 'x' ? ped.x : ped.z;
+      let j = nextJunction(parallel, sw.dir);
+      if (j < -CITY_HALF || j > CITY_HALF) {
+        sw.dir = -sw.dir;
+        j = nextJunction(parallel, sw.dir);
+      }
+      const toJ = (j - parallel) * sw.dir;
+      const jx = sw.axis === 'x' ? j : sw.line;
+      const jz = sw.axis === 'x' ? sw.line : j;
+      if (toJ >= 0 && toJ < ZEBRA_OFF - 1) {
+        const far = sidewalkPoint(sw, j + sw.dir * ZEBRA_OFF);
+        ped.wp = { x: far.x, z: far.z, kind: 'cross', jx, jz, axis: sw.axis, j };
+      } else {
+        const at = sidewalkPoint(sw, j - sw.dir * ZEBRA_OFF);
+        ped.wp = { x: at.x, z: at.z, kind: 'along', j };
+      }
+    }
+
+    // Steer at the waypoint. On a zebra against the signal, hurry
+    // across — never wait in the road.
+    if (ped.wp) {
+      ped.angle = Math.atan2(ped.wp.z - ped.z, ped.wp.x - ped.x);
+      ped.speed = ped.base;
+      if (ped.wp.kind === 'cross' && hasSignals && isSignalledJunction(ped.wp.jx, ped.wp.jz)
+        && pedState(ped.wp.jx, ped.wp.jz, ped.wp.axis, sys.time) !== 'walk') {
+        ped.speed = ped.base * 1.6;
+      }
+    } else if (!ped.waiting) {
+      ped.speed = ped.base;
+    }
+  }
+
   function updatePed(player, ped, dt) {
     if (ped.mode === 'flee') {
       ped.speed = ped.base * 2.4;
@@ -564,6 +927,12 @@ export function createTraffic(world, vehicles) {
       ped.speed = 0;
       ped.duckT -= dt;
       if (ped.duckT <= 0) ped.mode = ped.beach ? 'beach' : 'walk';
+    } else if (ped.mode === 'chat') {
+      // A stopped pair, talking: still, facing each other, until the
+      // chat runs out — then they walk on.
+      ped.speed = 0;
+      ped.chatT -= dt;
+      if (ped.chatT <= 0) ped.mode = ped.beach ? 'beach' : 'walk';
     } else if (ped.mode === 'fight') {
       ped.speed = ped.base * 1.8;
       ped.angle = Math.atan2(player.z - ped.z, player.x - ped.x);
@@ -581,15 +950,44 @@ export function createTraffic(world, vehicles) {
       }
     } else {
       ped.speed = ped.base;
-      // Market shoppers stay near their aisle; sidewalk walkers
-      // wander until something solid turns them.
-      if (ped.anchor && dist2(ped.x, ped.z, ped.anchor.x, ped.anchor.z) > 45) {
-        ped.angle = Math.atan2(ped.anchor.z - ped.z, ped.anchor.x - ped.x);
+      if (ped.sw) {
+        // Sidewalk route: stays on the 9 m strip, crosses only on
+        // zebras at signalled junctions. Sets angle/speed itself.
+        updateSidewalkPed(ped, dt);
       } else {
-        ped.angle += (Math.random() - 0.5) * 0.5 * dt;
-      }
-      if (w.isSolid(ped.x + Math.cos(ped.angle) * 6, ped.z + Math.sin(ped.angle) * 6)) {
-        ped.angle += (Math.random() < 0.5 ? 1 : -1) * (0.9 + Math.random() * 0.9);
+        // Market shoppers stay near their aisle; a walker with no
+        // route wanders until something solid turns it.
+        if (ped.anchor && dist2(ped.x, ped.z, ped.anchor.x, ped.anchor.z) > 45) {
+          ped.angle = Math.atan2(ped.anchor.z - ped.z, ped.anchor.x - ped.x);
+        } else {
+          ped.angle += (Math.random() - 0.5) * 0.5 * dt;
+        }
+        if (w.isSolid(ped.x + Math.cos(ped.angle) * 6, ped.z + Math.sin(ped.angle) * 6)) {
+          ped.angle += (Math.random() < 0.5 ? 1 : -1) * (0.9 + Math.random() * 0.9);
+        }
+        // Kerb wait: a walker about to step off the kerb into a
+        // crossing reads the same signal the cars read and waits while
+        // their crossing direction is red; one already on the road when
+        // it turns red hurries across. No jaywalkers any more: every
+        // ped obeys the signal.
+        if (w.trafficLights) {
+          const block = CFG.BLOCK || 200;
+          const jx = Math.round(ped.x / block) * block;
+          const jz = Math.round(ped.z / block) * block;
+          const nearJunction = Math.abs(ped.x - jx) <= 18 && Math.abs(ped.z - jz) <= 18;
+          const signalled = ((jx + 1400) % 400 === 0) && ((jz + 1400) % 400 === 0);
+          if (nearJunction && signalled) {
+            // Walking east-west crosses the north-south road, so the
+            // walk signal runs with the east-west green, and vice versa.
+            const walkAxis = Math.abs(Math.cos(ped.angle)) >= Math.abs(Math.sin(ped.angle)) ? 'x' : 'z';
+            if (pedState(jx, jz, walkAxis, sys.time) !== 'walk') {
+              const onRoad = !!w.roadAt(ped.x, ped.z);
+              const aheadRoad = !!w.roadAt(ped.x + Math.cos(ped.angle) * 2, ped.z + Math.sin(ped.angle) * 2);
+              if (!onRoad && aheadRoad) ped.speed = 0;
+              else if (onRoad) ped.speed = ped.base * 1.6;
+            }
+          }
+        }
       }
     }
     const nx = ped.x + Math.cos(ped.angle) * ped.speed * dt;
@@ -608,6 +1006,9 @@ export function createTraffic(world, vehicles) {
     sys.time += dt;
     if (events && typeof events.time === 'number') sys.time = events.time;
     if (events && events.gunfire) reportGunfire(events.gunfire.x, events.gunfire.z);
+    // The lights run on this same clock, so a lamp and the cars
+    // waiting under it can never disagree.
+    if (lights) lights.update(sys.time);
     ensureLife(player);
     for (const car of sys.cars) {
       if (car.traffic && !car.parkedRow) updateMover(player, car, dt);
@@ -646,7 +1047,7 @@ export function createTraffic(world, vehicles) {
       if (c.parkedRow) parked++;
       else if (c.traffic) { moving++; if (c.moped) mopeds++; }
     }
-    return { moving, parked, mopeds, peds: sys.peds.length, total: sys.cars.length };
+    return { moving, parked, mopeds, peds: sys.peds.length, total: sys.cars.length, lights: lights ? lights.summary() : null };
   }
 
   function hud() {

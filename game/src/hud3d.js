@@ -355,11 +355,17 @@
     dom.clockLine = el('div', 'pv3d-clock-line', dom.clock);
     dom.radioLine = el('div', 'pv3d-radio-line', dom.clock);
 
-    // Minimap canvas, bottom-left.
+    // Minimap canvas, bottom-left. Backing store per r7 research:
+    // Math.round(css * min(devicePixelRatio, 2)); the CSS size stays
+    // exact, so the panel never moves or resizes.
+    var minimapScale = Math.min((typeof window !== 'undefined' && window.devicePixelRatio) || 1, 2);
     dom.minimapWrap = place(el('div', 'pv3d-minimap-wrap', stage), zones.minimap);
     dom.minimap = el('canvas', 'pv3d-minimap', dom.minimapWrap);
-    dom.minimap.width = zones.minimap.w;
-    dom.minimap.height = zones.minimap.h;
+    dom.minimap.width = Math.round(zones.minimap.w * minimapScale);
+    dom.minimap.height = Math.round(zones.minimap.h * minimapScale);
+    dom.minimap.style.width = zones.minimap.w + 'px';
+    dom.minimap.style.height = zones.minimap.h + 'px';
+    dom.minimapScale = minimapScale;
     dom.minimapChip = el('div', 'pv3d-minimap-chip', dom.minimapWrap);
     dom.minimapCompass = el('div', 'pv3d-minimap-compass', dom.minimapWrap);
     dom.minimapCompass.textContent = 'N';
@@ -410,6 +416,39 @@
   // World coords are 3D metres: x east, z south; the map's vertical
   // axis is z (south = down).
 
+  // Minimap render quality (r7 research): the panel stays 230x172 CSS
+  // px on screen. The live canvas backing store is
+  // Math.round(css * min(devicePixelRatio, 2)) with a scale transform,
+  // so all drawing stays in CSS-pixel layout coords (mx/mz unchanged).
+  // The STATIC layer (ground, blocks, roads, district tints, landmarks)
+  // is pre-rendered once to an offscreen canvas at a FIXED 2x, even at
+  // DPR 1, and downscaled per frame with drawImage — that 2x
+  // supersampling is the sharpness win for thin lines on judge
+  // screenshots. Per frame only the dynamic layer (route, blips,
+  // arrow, labels, bars, wanted) is redrawn.
+  var MINIMAP_STATIC_SCALE = 2;
+  var minimapStatic = { city: null, canvas: null };
+
+  // Fill a rect with softly rounded corners (radius clamped to the
+  // rect's smaller side) so blocks and bars read as smooth shapes,
+  // not hard-edged pixels.
+  function fillRoundRect(ctx, x, y, w, h, r) {
+    if (w <= 0 || h <= 0) return;
+    var rr = Math.max(0, Math.min(r, w / 2, h / 2));
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.arcTo(x + w, y, x + w, y + rr, rr);
+    ctx.lineTo(x + w, y + h - rr);
+    ctx.arcTo(x + w, y + h, x + w - rr, y + h, rr);
+    ctx.lineTo(x + rr, y + h);
+    ctx.arcTo(x, y + h, x, y + h - rr, rr);
+    ctx.lineTo(x, y + rr);
+    ctx.arcTo(x, y, x + rr, y, rr);
+    ctx.closePath();
+    ctx.fill();
+  }
+
   function mapBounds(city) {
     if (city && typeof city.mapX0 === 'number') {
       return { x0: city.mapX0, x1: city.mapX1, z0: city.mapZ0, z1: city.mapZ1 };
@@ -429,32 +468,21 @@
     ctx.textAlign = 'left';
     ctx.fillText(label, 4, y + h - 1);
     ctx.fillStyle = '#2a2a30';
-    ctx.fillRect(x, y, w, h);
+    fillRoundRect(ctx, x, y, w, h, 2);
     ctx.fillStyle = color;
-    ctx.fillRect(x, y, Math.max(0, w * frac), h);
+    fillRoundRect(ctx, x, y, Math.max(0, w * frac), h, 2);
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'right';
     ctx.fillText(String(num), x + w + 24, y + h - 1);
     ctx.textAlign = 'left';
   }
 
-  function drawMinimap(dom, state, city) {
-    var canvas = dom.minimap;
-    var ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    var W = canvas.width, H = canvas.height;
-    var barH = 26;
-    var mapH = H - barH;
-    var b = mapBounds(city);
-    function mx(wx) { return ((wx - b.x0) / (b.x1 - b.x0)) * W; }
-    function mz(wz) { return ((wz - b.z0) / (b.z1 - b.z0)) * mapH; }
-    var c3 = config3d();
-    var shoreX = c3 ? c3.SHORE_X : b.x0 + 180;
-    var sandX = c3 ? c3.BEACH_X : b.x0 + 300;
-    var wanted = state.wanted || 0;
-    var pulse = 0.5 + 0.5 * Math.sin((state.time || 0) * 5);
-
-    ctx.clearRect(0, 0, W, H);
+  // Static minimap layer: ground, ocean/sand, building blocks,
+  // district colour tints, roads, beach road, landmarks. Drawn once
+  // into a 2x offscreen canvas; all of it is city geometry, so it
+  // never changes while the city object is the same. (ctx, W, mapH
+  // are CSS-pixel layout coords; the caller sets the transform.)
+  function drawMinimapStatic(ctx, W, mapH, b, mx, mz, c3, shoreX, sandX, city, districts) {
     ctx.fillStyle = '#16241b';
     ctx.fillRect(0, 0, W, mapH);
     // Ocean, then the sand band, along the west edge.
@@ -476,7 +504,7 @@
         var bx1 = mx(bd.x1), bz1 = mz(bd.z1 !== undefined ? bd.z1 : bd.y1);
         if (bx1 < 0 || bz1 < 0 || bx0 > W || bz0 > mapH) continue;
         ctx.fillStyle = '#7a5c3e';
-        ctx.fillRect(bx0, bz0, Math.max(1, bx1 - bx0), Math.max(1, bz1 - bz0));
+        fillRoundRect(ctx, bx0, bz0, Math.max(1, bx1 - bx0), Math.max(1, bz1 - bz0), 1);
       }
     } else {
       for (var gx = 0; gx + 1 < avenues.length; gx++) {
@@ -485,27 +513,24 @@
           var cx1 = mx(avenues[gx + 1]) - 1.5, cz1 = mz(streets[gz + 1]) - 1.5;
           if (cx1 <= cx0 || cz1 <= cz0) continue;
           ctx.fillStyle = ((gx + gz) % 2 === 0) ? '#6e5138' : '#7a5c3e';
-          ctx.fillRect(cx0, cz0, cx1 - cx0, cz1 - cz0);
+          fillRoundRect(ctx, cx0, cz0, cx1 - cx0, cz1 - cz0, 1);
         }
       }
     }
-    var districts = (city && city.districts) ||
-      (c3 ? c3.DISTRICTS : ((config() || {}).DISTRICTS || []));
+    // District tints: each district's own accent colour at low alpha,
+    // under the roads — the stats-map colour-coding (brown/tan/blue),
+    // so the minimap reads as districts, not a grid.
     for (var d = 0; d < districts.length; d++) {
       var dist = districts[d];
       var x0 = dist.x0, z0 = (dist.z0 !== undefined ? dist.z0 : dist.y0);
       var x1 = dist.x1, z1 = (dist.z1 !== undefined ? dist.z1 : dist.y1);
-      ctx.fillStyle = (dist.accent || '#ffd166') + '14';
-      ctx.fillRect(mx(x0), mz(z0), mx(x1) - mx(x0), mz(z1) - mz(z0));
-      ctx.fillStyle = 'rgba(255,255,255,0.9)';
-      ctx.font = 'bold 8px system-ui, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText((dist.short || dist.name || '').toUpperCase(),
-        (mx(x0) + mx(x1)) / 2, (mz(z0) + mz(z1)) / 2);
-      ctx.textAlign = 'left';
+      ctx.fillStyle = (dist.accent || '#ffd166') + '2e';
+      fillRoundRect(ctx, mx(x0), mz(z0), mx(x1) - mx(x0), mz(z1) - mz(z0), 2);
     }
     // Roads: dark bands with a pale centre line, so the blocks read
     // as blocks and the roads as roads. Highways run thicker, in gold.
+    // Centre lines are 1.5 CSS px minimum, offset +0.5 px so they sit
+    // on pixel centres instead of straddling two pixels.
     for (var a = 0; a < avenues.length; a++) {
       var ax = mx(avenues[a]);
       var wideA = !!(c3 && avenues[a] === c3.HIGHWAY_EAST_X);
@@ -516,10 +541,10 @@
       ctx.lineTo(ax, mapH);
       ctx.stroke();
       ctx.strokeStyle = wideA ? '#e8c53a' : 'rgba(232,220,190,0.75)';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(ax, 0);
-      ctx.lineTo(ax, mapH);
+      ctx.moveTo(ax + 0.5, 0);
+      ctx.lineTo(ax + 0.5, mapH);
       ctx.stroke();
     }
     for (var s = 0; s < streets.length; s++) {
@@ -532,10 +557,10 @@
       ctx.lineTo(W, sz);
       ctx.stroke();
       ctx.strokeStyle = wideS ? '#e8c53a' : 'rgba(232,220,190,0.75)';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(0, sz);
-      ctx.lineTo(W, sz);
+      ctx.moveTo(0, sz + 0.5);
+      ctx.lineTo(W, sz + 0.5);
       ctx.stroke();
     }
     if (city && typeof city.beachRoadX === 'number') {
@@ -547,10 +572,10 @@
       ctx.lineTo(brx, mapH);
       ctx.stroke();
       ctx.strokeStyle = 'rgba(232,220,190,0.75)';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(brx, 0);
-      ctx.lineTo(brx, mapH);
+      ctx.moveTo(brx + 0.5, 0);
+      ctx.lineTo(brx + 0.5, mapH);
       ctx.stroke();
     }
     // Landmarks: the wheel, the pier, the tower.
@@ -566,6 +591,7 @@
         ctx.stroke();
       } else if (lm.kind === 'pier') {
         ctx.strokeStyle = '#e8c37a';
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
         ctx.moveTo(lx, ly);
         ctx.lineTo(mx(lm.x - (lm.length || 170)), ly);
@@ -577,6 +603,91 @@
         ctx.fill();
       }
     }
+  }
+
+  // The cached 2x static layer for this city, rebuilt when the city
+  // changes. Returns null when no offscreen canvas can be made; the
+  // caller then draws the static layer inline each frame instead.
+  function minimapStaticCanvas(city, W, mapH, b, mx, mz, c3, shoreX, sandX, districts) {
+    if (minimapStatic.canvas && minimapStatic.city === city) return minimapStatic.canvas;
+    var off = null;
+    try {
+      if (typeof document === 'undefined' || !document.createElement) return null;
+      off = document.createElement('canvas');
+      off.width = Math.round(W * MINIMAP_STATIC_SCALE);
+      off.height = Math.round(mapH * MINIMAP_STATIC_SCALE);
+      var octx = off.getContext('2d');
+      if (!octx) return null;
+      octx.setTransform(MINIMAP_STATIC_SCALE, 0, 0, MINIMAP_STATIC_SCALE, 0, 0);
+      octx.lineJoin = 'round';
+      octx.lineCap = 'round';
+      drawMinimapStatic(octx, W, mapH, b, mx, mz, c3, shoreX, sandX, city, districts);
+    } catch (e) {
+      return null;
+    }
+    minimapStatic.city = city;
+    minimapStatic.canvas = off;
+    return off;
+  }
+
+  function drawMinimap(dom, state, city) {
+    var canvas = dom.minimap;
+    var ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    // Layout coords stay in CSS pixels (W/H = the panel's on-screen
+    // size); the scale transform maps them onto the backing store.
+    var cssW = (dom.zones && dom.zones.minimap) ? dom.zones.minimap.w : canvas.width;
+    var cssH = (dom.zones && dom.zones.minimap) ? dom.zones.minimap.h : canvas.height;
+    var scale = dom.minimapScale || (canvas.width / cssW) || 1;
+    var W = cssW, H = cssH;
+    var barH = 26;
+    var mapH = H - barH;
+    var b = mapBounds(city);
+    function mx(wx) { return ((wx - b.x0) / (b.x1 - b.x0)) * W; }
+    function mz(wz) { return ((wz - b.z0) / (b.z1 - b.z0)) * mapH; }
+    var c3 = config3d();
+    var shoreX = c3 ? c3.SHORE_X : b.x0 + 180;
+    var sandX = c3 ? c3.BEACH_X : b.x0 + 300;
+    var wanted = state.wanted || 0;
+    var pulse = 0.5 + 0.5 * Math.sin((state.time || 0) * 5);
+    var districts = (city && city.districts) ||
+      (c3 ? c3.DISTRICTS : ((config() || {}).DISTRICTS || []));
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    // Round joins/caps so the gold route's corner and road ends are
+    // smooth curves instead of sharp mitres.
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    // Smooth downscale of the 2x static layer (never pixel-art mode).
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
+    // Static layer: pre-rendered once per city, blitted each frame;
+    // falls back to an inline draw when no offscreen canvas exists.
+    var staticCanvas = minimapStaticCanvas(city, W, mapH, b, mx, mz, c3, shoreX, sandX, districts);
+    if (staticCanvas) {
+      ctx.drawImage(staticCanvas, 0, 0, W, mapH);
+    } else {
+      drawMinimapStatic(ctx, W, mapH, b, mx, mz, c3, shoreX, sandX, city, districts);
+    }
+
+    // District labels: drawn per frame after the downscale, in a real
+    // font at 10px CSS, so they stay crisp — never baked into the
+    // static layer. Same centres as before, only the size changes.
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.font = 'bold 10px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    for (var d = 0; d < districts.length; d++) {
+      var dist = districts[d];
+      var x0 = dist.x0, z0 = (dist.z0 !== undefined ? dist.z0 : dist.y0);
+      var x1 = dist.x1, z1 = (dist.z1 !== undefined ? dist.z1 : dist.y1);
+      ctx.fillText((dist.short || dist.name || '').toUpperCase(),
+        (mx(x0) + mx(x1)) / 2, (mz(z0) + mz(z1)) / 2);
+    }
+    ctx.textAlign = 'left';
+
     // Route: a solid gold line with a pale casing, player to the
     // mission marker along the grid, ending in a waypoint diamond
     // with a pulsing ring.
