@@ -24,9 +24,14 @@
 // straight off sys.cars / sys.peds. With it, the THREE group is
 // synced every frame (position + rotation.y = -angle, model faces +X).
 //
-// Density (live street, after ensureLife):
-//   moving cars 34 (30 cars + 4 mopeds), parked rows ~117,
-//   pedestrians 86+ (18 beach, 24 market, 44 sidewalk).
+// Density (live street, after ensureLife): the same caps as r7, but
+// spent where the player is — moving cars 34 (30 cars + 4 mopeds),
+// parked rows ~117, pedestrians 86 (18 beach, 24 market, 44 sidewalk).
+// Movers and sidewalk walkers spawn in a 60–180 m ring around the
+// player and recycle beyond a speed-scaled radius (300 m on foot,
+// 170 m driving), so the bubble around the player
+// stays full; beach strollers keep to the promenade strip west of the
+// beach road and market shoppers to the Mercado plaza aisles.
 //
 // The lights live in trafficlights3d.js: the 14 s cycle, the
 // per-junction phase, and the visible heads are one source of truth
@@ -43,7 +48,7 @@
 //   counts(), hud()
 // Car records live in sys.cars, people in sys.peds.
 
-import { CFG3D as CFG } from './config3d.js';
+import { CFG3D as CFG, districtAt, gradeBlend } from './config3d.js';
 import { directionState, pedState, createTrafficLights, STOP_GAP, SIGNAL_JUNCTIONS } from './trafficlights3d.js';
 
 const MOVERS_WANTED = 34;
@@ -52,6 +57,57 @@ const BEACH_PEDS = 18;
 const MARKET_PEDS = 24;
 const SIDEWALK_PEDS = 44;
 const LANE_OFFSET = 3.5; // metres off the centreline, right-hand lane
+
+// ---- downed peds ----------------------------------------------------------
+// A ped shot down lies where it fell and fades after ~25 s — a body in
+// the road is gone within half a minute, never for the whole session.
+const DOWN_FADE_S = 25;
+
+// ---- beach promenade ------------------------------------------------------
+// Beach strollers walk a sand strip west of the beach road (centreline
+// -1430, kerb -1437): strip centre -1470, waypoints -1500..-1462, and a
+// hard guard at -1458 so no stroller ever reaches the road.
+const PROMENADE_X = -1470;
+const PROM_WALK_MIN = -1500;
+const PROM_WALK_MAX = -1462;
+const PROM_SPAWN_MIN = -1520;
+const PROM_SPAWN_MAX = -1465;
+const PROM_GUARD_X = -1458;
+
+// ---- market aisles --------------------------------------------------------
+// Mercado Citrus stalls sit in one plaza block (stall rows z=72/128,
+// counters 10x5 at x=-768,-734,-700,-666,-632). Shoppers walk the aisle
+// (z=100) stall to stall and browse at the stall fronts (z=78/122) —
+// the whole plaza is inside the block, so a shopper never needs the
+// carriageway. One shared read-only table; peds never mutate it.
+const MARKET_AISLE = {
+  x0: -770, x1: -630, aisleZ: 100, frontN: 78, frontS: 122,
+  stalls: [-768, -734, -700, -666, -632],
+};
+
+// ---- population bubble (density near the player) --------------------------
+// GTA streams population around the player: agents spawn in a ring just
+// outside the view (60–180 m) and recycle when far away (speed-scaled
+// 170–300 m), so the same ~120 agents read as a full street wherever
+// the player is, instead of a thin scatter over 2.8 x 2.8 km. Spawn
+// weighted by district: the market and the beach road run 1.5x, main
+// avenues 1.0x, residential 0.7x. Caps never move (34 movers / 86 peds).
+const RING_MIN = 60;
+const RING_MAX = 180;
+const RECYCLE_FAR = 300;
+const RECYCLE_NEAR = 170;
+// The recycle radius scales with the player's speed. On foot the
+// bubble never outruns the peds, so a wide 300 m radius lets them
+// roam to the next junction (200 m away) and cross — with a fixed
+// 170 m radius a standing player never sees a crossing at all. When
+// driving (≥10 m/s) the player outruns the bubble, so the radius
+// tightens to 170 m, just past the 150 m the player sees, and the
+// street stays full. A despawn at 170–300 m is a few pixels and reads
+// as distance, not a pop.
+const DISTRICT_MULT = {
+  citrus: 1.5, boardwalk: 1.5, marina: 1.2, oldtown: 1.0,
+  northgate: 1.0, palmheights: 0.7, docks: 0.7,
+};
 
 // ---- sidewalk routing (pedestrians stay off the car lanes) --------------
 // Geometry, read off CFG + the painted markings in trafficlights3d.js:
@@ -236,6 +292,9 @@ function makeWorld(world) {
     // The scene group the light meshes hang from (trafficlights3d
     // builds into it); absent in stubs, where no meshes are built.
     group: w.group || null,
+    // District lookup for the bubble's per-district spawn weights;
+    // falls back to the config table when the world has none.
+    districtAt: typeof w.districtAt === 'function' ? w.districtAt.bind(w) : districtAt,
   };
 }
 
@@ -315,37 +374,93 @@ export function createTraffic(world, vehicles) {
     car.body.speed = car.speed;
   }
 
-  // A moving car: pick a road spot near the player so the streets
-  // around Rey are the busy ones, then cruise along the lanes. Keeps
-  // the nearest candidate tried, so a spawn never lands across town.
+  // The night factor for the traffic-light halos (B2's hook): prefer
+  // an explicit events.nightF when the caller passes one; otherwise
+  // derive it from the game clock — a fresh session opens at
+  // DAY_START_HOUR and the clock runs 24 h per DAY_LENGTH_S, the same
+  // rate S.time advances at. The factor is the blended grade `stars`
+  // (0 by day, 1 at full night, ramping across dawn/dusk) — the same
+  // quantity daynight3d calls nightness. Caveat: after loading a save
+  // the day/night clock is restored from the save while S.time restarts
+  // at 0, so the derived factor is phase-shifted until the caller
+  // passes nightF explicitly (one line in main3d's traffic.update
+  // call — flagged to the coordinator, not this file).
+  function nightFactor(events) {
+    if (events && typeof events.nightF === 'number') return clamp(events.nightF, 0, 1);
+    const t = events && typeof events.time === 'number' ? events.time : sys.time;
+    const dayLength = CFG.DAY_LENGTH_S || 480;
+    const startHour = CFG.DAY_START_HOUR ?? 9.5;
+    const hour = (((startHour + (t * 24) / dayLength) % 24) + 24) % 24;
+    const blend = gradeBlend(hour);
+    const stars = (blend.from.stars ?? 0) + ((blend.to.stars ?? 0) - (blend.from.stars ?? 0)) * blend.t;
+    return clamp(stars, 0, 1);
+  }
+
+  // Spawn weight of the district a point sits in (market / beach road
+  // 1.5x, avenues 1.0x, residential 0.7x). Unknown district: 1.0x.
+  function districtMultAt(x, z) {
+    const d = w.districtAt ? w.districtAt(x, z) : null;
+    const id = d && d.id ? d.id : null;
+    return (id && DISTRICT_MULT[id]) || 1.0;
+  }
+
+  // A point in the ring around the player (60–180 m, just outside the
+  // view so nothing pops in on screen), best of four candidates
+  // weighted toward lively districts. The angle is biased ahead of the
+  // player's heading (the street the player is about to drive into)
+  // and the radius is biased inward, so the bubble stays ahead of a
+  // driving player instead of trailing behind them.
+  function ringPoint(player, rng) {
+    const r = rng || Math.random;
+    let best = null;
+    let bestScore = -1;
+    for (let i = 0; i < 4; i++) {
+      let a;
+      if (typeof player.angle === 'number' && r() < 0.7) {
+        a = player.angle + (r() - 0.5) * Math.PI;
+      } else {
+        a = r() * Math.PI * 2;
+      }
+      const rad = RING_MIN + (r() * r()) * (RING_MAX - RING_MIN);
+      const x = clamp(player.x + Math.cos(a) * rad, -CITY_HALF + 20, CITY_HALF - 20);
+      const z = clamp(player.z + Math.sin(a) * rad, -CITY_HALF + 20, CITY_HALF - 20);
+      const score = districtMultAt(x, z) * (0.5 + r());
+      if (score > bestScore) { bestScore = score; best = { x, z }; }
+    }
+    return best;
+  }
+
+  // The road spot nearest a ring point, with a travel direction along
+  // it: the snapped coordinate says which road it is (x snapped =
+  // north-south road, travel along z; z snapped = east-west road).
+  function ringRoadSpot(player, rng) {
+    const r = rng || Math.random;
+    const p = ringPoint(player, r);
+    const snapped = w.nearestRoadPoint(p.x, p.z);
+    const onNSRoad = Math.abs(snapped.z - p.z) < 0.001;
+    const angle = onNSRoad
+      ? (r() < 0.5 ? Math.PI / 2 : -Math.PI / 2)
+      : (r() < 0.5 ? 0 : Math.PI);
+    return { x: snapped.x, z: snapped.z, angle };
+  }
+
+  // A moving car: spawned in the ring around the player, so the streets
+  // around Rey are the busy ones — never a map-wide scatter that reads
+  // empty everywhere. The recycle pass keeps it there.
   function spawnMover(player, rng) {
     const r = rng || rngFor(sys.rngSeed);
-    let spot = null;
-    let bestD = Infinity;
-    for (let tries = 0; tries < 8; tries++) {
-      const s = w.randomRoadSpot(r);
-      const d = dist2(s.x, s.z, player.x, player.z);
-      if (d < 600) { spot = s; break; }
-      if (d < bestD) { bestD = d; spot = s; }
-    }
+    const spot = ringRoadSpot(player, r);
     const model = CAR_MODELS[Math.floor(r() * CAR_MODELS.length)];
     const car = makeCarRecord(model, spot.x, spot.z, spot.angle || 0, {});
     sys.cars.push(car);
     return car;
   }
 
-  // A moped: same streets as the cars, but faster, nimbler, and
-  // flagged so the renderer draws a slim two-wheeler with a rider.
+  // A moped: same ring as the cars, but faster, nimbler, and flagged
+  // so the renderer draws a slim two-wheeler with a rider.
   function spawnMoped(player, rng) {
     const r = rng || rngFor(sys.rngSeed + 7);
-    let spot = null;
-    let bestD = Infinity;
-    for (let tries = 0; tries < 8; tries++) {
-      const s = w.randomRoadSpot(r);
-      const d = dist2(s.x, s.z, player.x, player.z);
-      if (d < 600) { spot = s; break; }
-      if (d < bestD) { bestD = d; spot = s; }
-    }
+    const spot = ringRoadSpot(player, r);
     const car = makeCarRecord('olas', spot.x, spot.z, spot.angle || 0, { moped: true, cruise: 15 + r() * 6 });
     sys.cars.push(car);
     return car;
@@ -379,14 +494,27 @@ export function createTraffic(world, vehicles) {
       shirt: SHIRTS[Math.floor(rng() * SHIRTS.length)],
       health: 100,
       mode: o.mode || 'walk',
+      // Home mode: where this ped belongs when a reaction ends — flee,
+      // duck, chat and fight all return here, never to a bare 'walk'
+      // that would leave a market/beach ped routeless.
+      home: o.home || o.mode || 'walk',
       fleeT: 0,
       duckT: 0,
       chatT: 0,
+      browseT: 0, // market: seconds left looking at a stall front
+      downT: 0, // downed: seconds left before the body fades
+      down: false,
+      fleeSw: null, // flee: the strip this flee runs on, pinned at its start
       anchor: o.anchor || null,
       beach: !!o.beach,
       fighter: false,
+      // Beach promenade strip centre for this ped (x = PROMENADE_X).
+      promX: o.promX || null,
+      // Market aisle table for this ped (shared MARKET_AISLE).
+      aisle: o.aisle || null,
+      front: null, // market: the stall front currently being browsed
       // Sidewalk route (sidewalk walkers only; beach/market peds leave
-      // it null and keep their old behaviour): the road the ped walks
+      // it null and keep their own line instead): the road the ped walks
       // beside (axis 'x' = east-west road, line = its centreline),
       // which side of it, and which way along it. wp is the current
       // waypoint, waiting is a kerb wait for a walk signal, and
@@ -400,15 +528,17 @@ export function createTraffic(world, vehicles) {
     };
   }
 
-  // A pedestrian: either a beach stroller with a patch of sand to
-  // wander, or a sidewalk walker in a small group near a road.
+  // A pedestrian: either a beach stroller on the promenade strip west
+  // of the beach road, or a sidewalk walker in a small group near a road.
   function spawnPed(player, rng, beach) {
     const r = rng || rngFor(sys.rngSeed + 21);
     let ped;
     if (beach) {
-      const x = -1620 + r() * 200; // sand between shore and grid edge
+      // Sand between the beach road and the water, never the road:
+      // the strip runs -1520..-1465, 28 m clear of the kerb at -1437.
+      const x = PROM_SPAWN_MIN + r() * (PROM_SPAWN_MAX - PROM_SPAWN_MIN);
       const z = -1200 + r() * 2400;
-      ped = makePedRecord(x, z, r, { mode: 'beach', beach: true, base: 0.8 + r() * 1, anchor: { x, z } });
+      ped = makePedRecord(x, z, r, { mode: 'beach', home: 'beach', beach: true, base: 0.8 + r() * 1, anchor: { x, z }, promX: PROMENADE_X });
     } else {
       let spot = null;
       let bestD = Infinity;
@@ -450,16 +580,36 @@ export function createTraffic(world, vehicles) {
         const at = sidewalkPoint(sw, parallel);
         ped = makePedRecord(at.x, at.z, r, {
           mode: 'walk',
+          home: 'walk',
           base: 1 + r() * 1.4,
           anchor: { x: cx, z: cz },
         });
         ped.sw = sw;
+      } else if (kind === 'beach') {
+        // Promenade strollers: on the sand strip, spread along their
+        // home stretch of it — never on the beach road or the grid.
+        ped = makePedRecord(
+          clamp(cx + (r() - 0.5) * 30, PROM_SPAWN_MIN, PROM_SPAWN_MAX),
+          cz + (r() - 0.5) * 50, r, {
+            mode: 'beach',
+            home: 'beach',
+            beach: true,
+            base: 0.7 + r() * 0.8,
+            anchor: { x: cx, z: cz },
+            promX: PROMENADE_X,
+          });
       } else {
-        ped = makePedRecord(cx + (r() - 0.5) * 35, cz + (r() - 0.5) * 25, r, {
-          mode: kind === 'beach' ? 'beach' : 'walk',
-          beach: kind === 'beach',
-          base: kind === 'beach' ? 0.7 + r() * 0.8 : 1 + r() * 1.4,
-          anchor: { x: cx, z: cz },
+        // Market shoppers: all three groups browse the one real market,
+        // the Mercado plaza — along the aisle, never on a road. The old
+        // anchors sat on road centrelines, which is why shoppers were
+        // standing in the lanes.
+        const a = MARKET_AISLE;
+        ped = makePedRecord(a.x0 + 10 + r() * (a.x1 - a.x0 - 20), a.aisleZ + (r() - 0.5) * 12, r, {
+          mode: 'market',
+          home: 'market',
+          base: 0.9 + r() * 0.9,
+          anchor: { x: -700, z: 100 },
+          aisle: a,
         });
       }
       ped.speed = ped.base;
@@ -478,6 +628,140 @@ export function createTraffic(world, vehicles) {
       b.angle = Math.atan2(a.z - b.z, a.x - b.x);
     }
     return made;
+  }
+
+  // One sidewalk walker in the ring around the player (top-ups and
+  // recycling): a road spot in the ring, then onto its 9 m strip.
+  function spawnSidewalkPedNear(player, rng) {
+    const r = rng || Math.random;
+    const built = sidewalkFromSpot(ringRoadSpot(player, r), r);
+    const ped = makePedRecord(built.x, built.z, r, {
+      mode: 'walk', home: 'walk', base: 1 + r() * 1.4,
+      anchor: { x: player.x, z: player.z },
+    });
+    ped.sw = built.sw;
+    ped.speed = ped.base;
+    sys.peds.push(ped);
+    return ped;
+  }
+
+  // One market shopper in the Mercado plaza aisle (top-ups).
+  function spawnMarketPed(rng) {
+    const r = rng || Math.random;
+    const a = MARKET_AISLE;
+    const ped = makePedRecord(a.x0 + 10 + r() * (a.x1 - a.x0 - 20), a.aisleZ + (r() - 0.5) * 12, r, {
+      mode: 'market', home: 'market', base: 0.9 + r() * 0.9,
+      anchor: { x: -700, z: 100 }, aisle: a,
+    });
+    ped.speed = ped.base;
+    sys.peds.push(ped);
+    return ped;
+  }
+
+  // Metres from the ped to its sidewalk strip (0 when on it): the
+  // pinned flee strip while fleeing, else the nearest strip.
+  function distToStrip(ped) {
+    const sw = (ped.fleeSw && ped.mode === 'flee') ? ped.fleeSw : nearestSidewalk(ped);
+    const perp = sw.axis === 'x' ? ped.z : ped.x;
+    return Math.abs(perp - (sw.line + sw.side * SWALK_OFF));
+  }
+
+  // Where a fleeing ped runs: a point on its OWN line, 30 m along it
+  // away from the shot — the sidewalk strip, the market aisle, or the
+  // beach promenade. A ped on a strip runs along it; a ped caught
+  // mid-road runs diagonally to the nearest strip and then along it.
+  // It never runs straight across the lanes the way the old flee did.
+  function fleeTarget(ped) {
+    const shot = sys.lastShotAt;
+    const awayX = shot ? ped.x - shot.x : Math.cos(ped.angle);
+    const awayZ = shot ? ped.z - shot.z : Math.sin(ped.angle);
+    if (ped.home === 'market' && ped.aisle) {
+      const a = ped.aisle;
+      const dir = awayX >= 0 ? 1 : -1;
+      return { x: clamp(ped.x + dir * 30, a.x0, a.x1), z: a.aisleZ };
+    }
+    if (ped.home === 'beach' || ped.beach) {
+      const dir = awayZ >= 0 ? 1 : -1;
+      const cz = ped.anchor ? ped.anchor.z : ped.z;
+      return { x: PROMENADE_X, z: clamp(ped.z + dir * 30, cz - 80, cz + 80) };
+    }
+    // Sidewalk walker: run on its flee strip, pinned for the whole
+    // flee (ped.fleeSw) — at a junction corner two strips are
+    // equidistant, and re-picking every frame flips the target back
+    // and forth while the ped zigzags in place.
+    const sw = ped.fleeSw || nearestSidewalk(ped);
+    const perp = sw.axis === 'x' ? ped.z : ped.x;
+    const stripPerp = sw.line + sw.side * SWALK_OFF;
+    const along = sw.axis === 'x' ? ped.x : ped.z;
+    if (Math.abs(perp - stripPerp) > 2) {
+      // Off the strip (mid-road, mid-crossing): shortest exit first —
+      // straight to the nearest point on the strip, not 30 m along it
+      // (which would run the ped parallel to the strip, down the lane).
+      return sidewalkPoint(sw, along);
+    }
+    const awayAlong = sw.axis === 'x' ? awayX : awayZ;
+    const dir = awayAlong >= 0 ? 1 : -1;
+    return sidewalkPoint(sw, clamp(along + dir * 30, -CITY_HALF + 20, CITY_HALF - 20));
+  }
+
+  // A car body out of the scene (wrecked or recycled): the renderer's
+  // despawn when it has one, else drop the group from its parent.
+  function despawnCarBody(c) {
+    if (sys.vehicles && typeof sys.vehicles.despawn === 'function' && c.body) sys.vehicles.despawn(c.body);
+    else if (c.body && c.body.parent && typeof c.body.parent.remove === 'function') c.body.parent.remove(c.body);
+  }
+
+  // Recycle radius for this frame, from the player's speed (tracked
+  // from position deltas, smoothed over ~1 s, so it follows the
+  // player rather than any one frame). On foot the radius is wide
+  // (300 m) so peds roam to the next junction and cross; driving it
+  // tightens to 170 m so the bubble stays full.
+  function recycleDist() {
+    const s = sys._playerSpeed || 0;
+    return clamp(RECYCLE_FAR - s * 13, RECYCLE_NEAR, RECYCLE_FAR);
+  }
+
+  // Recycle agents that drifted out of sight (beyond the
+  // speed-scaled radius) back into the ring: movers and sidewalk
+  // walkers respawn near the player, so the bubble stays full without
+  // raising the cap. Beach and market peds are place-bound (promenade
+  // / plaza) and stay put; parked rows never move.
+  function recycleFar(player, rng) {
+    const r = rng || Math.random;
+    const RD = recycleDist();
+    for (let i = sys.cars.length - 1; i >= 0; i--) {
+      const c = sys.cars[i];
+      if (!c.traffic || c.parkedRow) continue;
+      if (dist2(c.x, c.z, player.x, player.z) > RD) {
+        despawnCarBody(c);
+        sys.cars.splice(i, 1);
+        if (c.moped) spawnMoped(player, r); else spawnMover(player, r);
+      }
+    }
+    for (let i = sys.peds.length - 1; i >= 0; i--) {
+      const p = sys.peds[i];
+      if (p.home !== 'walk' || p.health <= 0) continue;
+      if (dist2(p.x, p.z, player.x, player.z) > RD) {
+        sys.peds.splice(i, 1);
+        spawnSidewalkPedNear(player, r);
+      }
+    }
+  }
+
+  // Top the street back up to its counts after downed peds fade (or a
+  // recycle drops one): sidewalk walkers in the ring, beach strollers
+  // on the promenade, shoppers in the plaza.
+  function topUpPeds(player, rng) {
+    const r = rng || Math.random;
+    let beach = 0, market = 0, walk = 0;
+    for (const p of sys.peds) {
+      if (p.home === 'beach') beach++;
+      else if (p.home === 'market') market++;
+      else if (p.home === 'walk') walk++;
+    }
+    while (walk < SIDEWALK_PEDS) { spawnSidewalkPedNear(player, r); walk++; }
+    while (beach < BEACH_PEDS) { spawnPed(player, r, true); beach++; }
+    while (market < MARKET_PEDS) { spawnMarketPed(r); market++; }
   }
 
   // First-frame setup: top the traffic up to a full street, park two
@@ -794,13 +1078,25 @@ export function createTraffic(world, vehicles) {
       }
     }
 
-    // Off the strip (fled, fought): snap to the nearest sidewalk and
-    // walk back to it.
+    // Off the strip (fled, fought): walk straight back to the NEAREST
+    // strip — usually its own — at a hurry, not diagonally to the next
+    // junction's approach point (which used to march the ped across
+    // the lanes for seconds). Nearest STRIP, not nearest road: at a
+    // junction corner the nearest road's strip can be farther than its
+    // own, and re-snapping to it sends the ped across the lane. The
+    // threshold is 1 m: the strip sits at 9 m and the zebra band is
+    // 8–11 m, so a ped more than 1 m off the strip can miss the band
+    // when it crosses the next junction; within 1 m it is inside it.
     const perpNow = sw.axis === 'x' ? ped.z : ped.x;
-    if (Math.abs(perpNow - (sw.line + sw.side * SWALK_OFF)) > 1.5) {
-      ped.sw = nearestSidewalk(ped);
-      ped.wp = null;
-      sw = ped.sw;
+    const offOwn = Math.abs(perpNow - (sw.line + sw.side * SWALK_OFF));
+    if (offOwn > 1.0) {
+      const ns = nearestSidewalk(ped);
+      const nsPerp = ns.axis === 'x' ? ped.z : ped.x;
+      const nsOff = Math.abs(nsPerp - (ns.line + ns.side * SWALK_OFF));
+      if (nsOff < offOwn) { ped.sw = ns; sw = ns; }
+      const parallel = sw.axis === 'x' ? ped.x : ped.z;
+      const back = sidewalkPoint(sw, parallel);
+      ped.wp = { x: back.x, z: back.z, kind: 'back' };
     }
 
     // Arrived at the current waypoint? Snap to it exactly, apply its
@@ -905,10 +1201,12 @@ export function createTraffic(world, vehicles) {
     }
 
     // Steer at the waypoint. On a zebra against the signal, hurry
-    // across — never wait in the road.
+    // across — never wait in the road. Walking back to the strip after
+    // a reaction hurries too — the shortest time on the road wins.
     if (ped.wp) {
       ped.angle = Math.atan2(ped.wp.z - ped.z, ped.wp.x - ped.x);
       ped.speed = ped.base;
+      if (ped.wp.kind === 'back') ped.speed = ped.base * 1.6;
       if (ped.wp.kind === 'cross' && hasSignals && isSignalledJunction(ped.wp.jx, ped.wp.jz)
         && pedState(ped.wp.jx, ped.wp.jz, ped.wp.axis, sys.time) !== 'walk') {
         ped.speed = ped.base * 1.6;
@@ -920,33 +1218,100 @@ export function createTraffic(world, vehicles) {
 
   function updatePed(player, ped, dt) {
     if (ped.mode === 'flee') {
+      // Flee ALONG the ped's own line (sidewalk strip / market aisle /
+      // beach promenade), away from the shot — never straight across
+      // the lanes. A ped caught mid-road runs to the nearest strip
+      // first, then along it; afterwards it re-snaps to its route.
+      // The flee strip is pinned at the flee's start (see fleeTarget).
+      if (!ped.fleeSw && ped.home === 'walk') ped.fleeSw = nearestSidewalk(ped);
+      const target = fleeTarget(ped);
+      ped.angle = Math.atan2(target.z - ped.z, target.x - ped.x);
       ped.speed = ped.base * 2.4;
       ped.fleeT -= dt;
-      if (ped.fleeT <= 0) { ped.mode = ped.beach ? 'beach' : 'walk'; ped.fighter = false; }
+      if (ped.fleeT <= 0) {
+        // Not safe yet: keep running for the strip (max 4 s extra) —
+        // a flee must not end with the ped still standing in a lane.
+        // The bar is 1 m off the strip (inside the zebra band), not
+        // 1.5 m: at 1.5 m the ped is 0.5 m outside the band and walks
+        // its route parallel to the road through the next junction.
+        // The slowest walker (2.4 m/s) covers the farthest strip exit
+        // (~11 m from a junction centre) inside that window.
+        if (ped.home === 'walk' && distToStrip(ped) > 1.0 && ped.fleeT > -4) {
+          // keep fleeing
+        } else { ped.mode = ped.home; ped.fighter = false; ped.fleeSw = null; }
+      }
     } else if (ped.mode === 'duck') {
       ped.speed = 0;
       ped.duckT -= dt;
-      if (ped.duckT <= 0) ped.mode = ped.beach ? 'beach' : 'walk';
+      if (ped.duckT <= 0) ped.mode = ped.home;
     } else if (ped.mode === 'chat') {
       // A stopped pair, talking: still, facing each other, until the
-      // chat runs out — then they walk on.
+      // chat runs out — then they walk on, back on their own line.
       ped.speed = 0;
       ped.chatT -= dt;
-      if (ped.chatT <= 0) ped.mode = ped.beach ? 'beach' : 'walk';
+      if (ped.chatT <= 0) ped.mode = ped.home;
     } else if (ped.mode === 'fight') {
       ped.speed = ped.base * 1.8;
       ped.angle = Math.atan2(player.z - ped.z, player.x - ped.x);
       ped.fleeT -= dt;
       if (ped.fleeT <= 0 || dist2(ped.x, ped.z, player.x, player.z) > 200) {
-        ped.mode = 'walk';
         ped.fighter = false;
+        // Gives up mid-road: run for the strip like a fleer, don't
+        // stroll back through the lanes at walking pace. The bar is
+        // 1 m off the strip (inside the zebra band).
+        if (ped.home === 'walk' && distToStrip(ped) > 1.0) {
+          ped.mode = 'flee';
+          ped.fleeT = 2;
+        } else {
+          ped.mode = ped.home;
+        }
       }
     } else if (ped.mode === 'beach') {
+      // Promenade strollers: waypoint-walk the sand strip west of the
+      // beach road, within their home stretch. A hard guard turns any
+      // ped that drifts toward the road back west, so no stroller can
+      // ever reach the beach road's kerb.
       ped.speed = ped.base;
-      if (ped.anchor && dist2(ped.x, ped.z, ped.anchor.x, ped.anchor.z) > 35) {
-        ped.angle = Math.atan2(ped.anchor.z - ped.z, ped.anchor.x - ped.x);
+      if (ped.x > PROM_GUARD_X) {
+        ped.angle = Math.PI;
+        ped.wp = null;
       } else {
-        ped.angle += (Math.random() - 0.5) * 1.6 * dt;
+        const cz = ped.anchor ? ped.anchor.z : ped.z;
+        if (!ped.wp || dist2(ped.x, ped.z, ped.wp.x, ped.wp.z) < 2
+          || dist2(ped.x, ped.z, ped.wp.x, ped.wp.z) > 100) {
+          ped.wp = {
+            x: clamp(PROMENADE_X + (Math.random() - 0.5) * 20, PROM_WALK_MIN, PROM_WALK_MAX),
+            z: clamp(ped.z + (Math.random() - 0.5) * 80, cz - 60, cz + 60),
+          };
+        }
+        ped.angle = Math.atan2(ped.wp.z - ped.z, ped.wp.x - ped.x);
+      }
+    } else if (ped.mode === 'market') {
+      // Market shoppers: walk the plaza aisle stall to stall, step up
+      // to a stall front, browse a few seconds, move on. The whole
+      // plaza sits inside one block, so a shopper never needs a lane.
+      const a = ped.aisle || MARKET_AISLE;
+      if (ped.browseT > 0) {
+        ped.speed = 0;
+        ped.browseT -= dt;
+        if (ped.browseT <= 0) ped.wp = null;
+      } else {
+        if (!ped.wp) {
+          const sx = a.stalls[Math.floor(Math.random() * a.stalls.length)];
+          const sz = Math.random() < 0.5 ? a.frontN : a.frontS;
+          ped.wp = { x: sx, z: a.aisleZ, kind: 'aisle' };
+          ped.front = { x: sx, z: sz };
+        }
+        if (ped.wp.kind === 'aisle' && dist2(ped.x, ped.z, ped.wp.x, ped.wp.z) < 1.5) {
+          ped.wp = { x: ped.front.x, z: ped.front.z, kind: 'front' };
+        } else if (ped.wp.kind === 'front' && dist2(ped.x, ped.z, ped.wp.x, ped.wp.z) < 1.5) {
+          ped.wp = null;
+          ped.browseT = 4 + Math.random() * 6;
+          ped.speed = 0;
+        } else {
+          ped.angle = Math.atan2(ped.wp.z - ped.z, ped.wp.x - ped.x);
+          ped.speed = ped.base;
+        }
       }
     } else {
       ped.speed = ped.base;
@@ -955,39 +1320,13 @@ export function createTraffic(world, vehicles) {
         // zebras at signalled junctions. Sets angle/speed itself.
         updateSidewalkPed(ped, dt);
       } else {
-        // Market shoppers stay near their aisle; a walker with no
-        // route wanders until something solid turns it.
-        if (ped.anchor && dist2(ped.x, ped.z, ped.anchor.x, ped.anchor.z) > 45) {
-          ped.angle = Math.atan2(ped.anchor.z - ped.z, ped.anchor.x - ped.x);
-        } else {
-          ped.angle += (Math.random() - 0.5) * 0.5 * dt;
-        }
-        if (w.isSolid(ped.x + Math.cos(ped.angle) * 6, ped.z + Math.sin(ped.angle) * 6)) {
-          ped.angle += (Math.random() < 0.5 ? 1 : -1) * (0.9 + Math.random() * 0.9);
-        }
-        // Kerb wait: a walker about to step off the kerb into a
-        // crossing reads the same signal the cars read and waits while
-        // their crossing direction is red; one already on the road when
-        // it turns red hurries across. No jaywalkers any more: every
-        // ped obeys the signal.
-        if (w.trafficLights) {
-          const block = CFG.BLOCK || 200;
-          const jx = Math.round(ped.x / block) * block;
-          const jz = Math.round(ped.z / block) * block;
-          const nearJunction = Math.abs(ped.x - jx) <= 18 && Math.abs(ped.z - jz) <= 18;
-          const signalled = ((jx + 1400) % 400 === 0) && ((jz + 1400) % 400 === 0);
-          if (nearJunction && signalled) {
-            // Walking east-west crosses the north-south road, so the
-            // walk signal runs with the east-west green, and vice versa.
-            const walkAxis = Math.abs(Math.cos(ped.angle)) >= Math.abs(Math.sin(ped.angle)) ? 'x' : 'z';
-            if (pedState(jx, jz, walkAxis, sys.time) !== 'walk') {
-              const onRoad = !!w.roadAt(ped.x, ped.z);
-              const aheadRoad = !!w.roadAt(ped.x + Math.cos(ped.angle) * 2, ped.z + Math.sin(ped.angle) * 2);
-              if (!onRoad && aheadRoad) ped.speed = 0;
-              else if (onRoad) ped.speed = ped.base * 1.6;
-            }
-          }
-        }
+        // No route yet (a ped knocked far from its strip, or a legacy
+        // spawn): give it the nearest sidewalk route NOW instead of
+        // wandering — every walking ped has a route, so the old
+        // random-walk + kerb-wait fallback is gone.
+        ped.sw = nearestSidewalk(ped);
+        ped.wp = null;
+        updateSidewalkPed(ped, dt);
       }
     }
     const nx = ped.x + Math.cos(ped.angle) * ped.speed * dt;
@@ -1006,28 +1345,54 @@ export function createTraffic(world, vehicles) {
     sys.time += dt;
     if (events && typeof events.time === 'number') sys.time = events.time;
     if (events && events.gunfire) reportGunfire(events.gunfire.x, events.gunfire.z);
+    // Player speed, from position deltas (smoothed over ~1 s): the
+    // recycle radius follows it (wide on foot, tight when driving).
+    if (typeof player.x === 'number' && typeof player.z === 'number') {
+      if (sys._lastPx !== undefined) {
+        const sp = Math.hypot(player.x - sys._lastPx, player.z - sys._lastPz) / Math.max(dt, 0.001);
+        sys._playerSpeed = sys._playerSpeed === undefined ? sp
+          : sys._playerSpeed + (sp - sys._playerSpeed) * Math.min(1, dt * 1.5);
+      }
+      sys._lastPx = player.x; sys._lastPz = player.z;
+    }
     // The lights run on this same clock, so a lamp and the cars
-    // waiting under it can never disagree.
-    if (lights) lights.update(sys.time);
+    // waiting under it can never disagree — and the halo sizing gets
+    // the night factor, so the discs grow after dark (B2's hook).
+    if (lights) lights.update(sys.time, { nightF: nightFactor(events) });
     ensureLife(player);
+    const rng = rngFor(sys.rngSeed + 41);
     for (const car of sys.cars) {
       if (car.traffic && !car.parkedRow) updateMover(player, car, dt);
     }
     for (let i = sys.peds.length - 1; i >= 0; i--) {
       const ped = sys.peds[i];
-      if (ped.health <= 0) { sys.peds.splice(i, 1); continue; }
+      if (ped.health <= 0) {
+        // Downed, not gone: the body lies where it fell and fades
+        // after ~25 s, then the street tops back up (below). It never
+        // walks again and never blocks a lane for a whole session.
+        if (ped.mode !== 'down') {
+          ped.mode = 'down'; ped.down = true; ped.speed = 0; ped.downT = DOWN_FADE_S;
+        }
+        ped.downT -= dt;
+        if (ped.downT <= 0) sys.peds.splice(i, 1);
+        continue;
+      }
       updatePed(player, ped, dt);
     }
+    // Population bubble, once a second: recycle far agents into the
+    // ring around the player, then top the street back up to its
+    // counts (a faded body is replaced, not left as a hole).
+    sys.recycleT = (sys.recycleT || 0) + dt;
+    if (sys.recycleT >= 1) { sys.recycleT = 0; recycleFar(player, rng); }
+    topUpPeds(player, rng);
     // Wrecked traffic gets towed and replaced so the street never empties.
-    const rng = rngFor(sys.rngSeed + 41);
     let moving = 0;
     let mopeds = 0;
     for (let i = sys.cars.length - 1; i >= 0; i--) {
       const c = sys.cars[i];
       if (!c.traffic || c.parkedRow) continue;
       if (c.damage >= 100) {
-        if (sys.vehicles && typeof sys.vehicles.despawn === 'function' && c.body) sys.vehicles.despawn(c.body);
-        else if (c.body && c.body.parent && typeof c.body.parent.remove === 'function') c.body.parent.remove(c.body);
+        despawnCarBody(c);
         sys.cars.splice(i, 1);
         continue;
       }
@@ -1048,6 +1413,29 @@ export function createTraffic(world, vehicles) {
       else if (c.traffic) { moving++; if (c.moped) mopeds++; }
     }
     return { moving, parked, mopeds, peds: sys.peds.length, total: sys.cars.length, lights: lights ? lights.summary() : null };
+  }
+
+  // How full the street is around the player: movers + peds within
+  // `radius` m (default 150), split by ped home. The live-play probe
+  // for the bubble — the number that has to stay high everywhere.
+  function bubble(player, radius) {
+    const R = radius || 150;
+    let movers = 0, mopeds = 0, peds = 0, sidewalk = 0, beach = 0, market = 0;
+    for (const c of sys.cars) {
+      if (c.traffic && !c.parkedRow && dist2(c.x, c.z, player.x, player.z) <= R) {
+        movers++;
+        if (c.moped) mopeds++;
+      }
+    }
+    for (const p of sys.peds) {
+      if (dist2(p.x, p.z, player.x, player.z) <= R) {
+        peds++;
+        if (p.home === 'walk') sidewalk++;
+        else if (p.home === 'beach') beach++;
+        else if (p.home === 'market') market++;
+      }
+    }
+    return { movers, mopeds, peds, sidewalk, beach, market };
   }
 
   function hud() {
@@ -1071,6 +1459,7 @@ export function createTraffic(world, vehicles) {
   sys.lightIsRed = lightIsRed;
   sys.reportGunfire = reportGunfire;
   sys.counts = counts;
+  sys.bubble = bubble;
   sys.hud = hud;
   return sys;
 }

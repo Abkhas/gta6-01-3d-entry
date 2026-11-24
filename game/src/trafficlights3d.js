@@ -22,10 +22,20 @@
 // GTA rule, kept: red goes straight to green, no red-amber stage,
 // and the player is never penalised for running a light.
 //
-// Perf: the 22 junctions × 4 heads are a handful of InstancedMeshes
-// (poles, housings, one per lens colour, ped boxes, marking planes),
-// so the whole system costs ~7 draw calls. The per-frame update only
-// writes instance colours, and only when a junction's displayed state
+// r8 (daylight visibility): the r7 heads vanished by day — a contrast
+// problem, not a brightness one. Real signals fix it with hardware:
+// a black backplate behind each housing, a visor hood over each lens,
+// a mast-arm head hung over the lane centre, a daylight halo (an
+// additive radial disc) on the lit lens, and lit-lens colours punched
+// past 1.0 so the lit lens beats the ACES tonemap. The 14 s cycle,
+// per-junction offsets and the GTA red→green rule are untouched.
+//
+// Perf: the 22 junctions × 4 approaches × 2 heads (corner + mast-arm)
+// are a handful of InstancedMeshes (poles, housings, one per lens
+// colour, ped boxes, backplates, visors, halos, mast arms, risers,
+// marking planes), so the whole system costs ~12 draw calls. The
+// per-frame update only writes instance colours (and, on a state flip,
+// the halo matrices), and only when a junction's displayed state
 // actually changes.
 //
 // THREE arrives by dynamic import (the page's import map resolves
@@ -100,9 +110,16 @@ export function pedState(jx, jz, axis, timeS, cycle) {
   return 'walk';
 }
 
+// Lens heights (housing centre 5.1 m; red on top, green at the bottom).
+const LENS_Y = { red: 6.05, yellow: 5.1, green: 4.15 };
+
 // ---- head placement -----------------------------------------------------
 // One head per approach, on the far-right corner of its junction, so
 // each head stands on the far side facing the drivers it serves.
+// Plus a mast-arm head per approach, hung over the right-hand lane
+// centre on the far side (3.5 m off the centreline), so a head sits
+// in the driving sightline instead of only off to the side — the
+// corner head alone is a small target from a chase camera 30 m back.
 function headSpots(jx, jz) {
   return [
     { x: jx - 10, z: jz + 10, axis: 'z' }, // southbound
@@ -110,6 +127,31 @@ function headSpots(jx, jz) {
     { x: jx + 10, z: jz + 10, axis: 'x' }, // eastbound
     { x: jx - 10, z: jz - 10, axis: 'x' }, // westbound
   ];
+}
+
+// ---- daylight halo texture --------------------------------------------
+// One shared radial-gradient canvas texture for every lit-lens halo:
+// a white core fading to transparent, drawn once and reused by all
+// 176 halos. Additive blending means the halo only ever adds light —
+// it never paints a grey disc over the housing or the street. (This
+// is the same radial-gradient technique vehicles3d uses for headlight
+// glow; that module does not export its texture, so this file draws
+// its own rather than reaching across modules.)
+function glowTexture(THREE) {
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 128;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 2, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.3, 'rgba(255,255,255,0.55)');
+  grad.addColorStop(0.7, 'rgba(255,255,255,0.12)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
 // ---- road markings ------------------------------------------------------
@@ -165,7 +207,7 @@ export function createTrafficLights(world) {
     worldHeads: tls ? tls.length : 0,
     update: function () {},
     summary: function () {
-      return { built: ctl.built, junctions: ctl.junctions, heads: ctl.heads, worldHeads: ctl.worldHeads, slimmedWorldHeads: ctl.slimmedWorldHeads || 0 };
+      return { built: ctl.built, junctions: ctl.junctions, heads: ctl.heads, mastHeads: ctl.mastHeads || 0, worldHeads: ctl.worldHeads, slimmedWorldHeads: ctl.slimmedWorldHeads || 0 };
     },
   };
   if (!tls || !group) return ctl;
@@ -190,6 +232,10 @@ export function createTrafficLights(world) {
         if (child && child.geometry && child.geometry.type === 'BoxGeometry') {
           child.scale.set(0.45, 1, 0.45);
           slimmed++;
+        } else if (child && child.geometry && child.geometry.type === 'SphereGeometry') {
+          // r8: the world lamps are small (r 0.42 m) — fatten them so
+          // the 42 non-upgraded junctions read by day as well.
+          child.scale.setScalar(1.25);
         }
       }
     }
@@ -214,32 +260,64 @@ export function createTrafficLights(world) {
   // read. One writer, one formula: a head never disagrees with the
   // cars waiting under it. (world3d's own updateTrafficLights is
   // never called by the game loop, so its heads would otherwise sit
-  // frozen at t=0.)
+  // frozen at t=0.) r8: lit emissive 4.0, not 2.2 — under a 2.4–3.0
+  // sun with ACES tonemapping the old value washed out by day.
   function driveWorldHeads(timeS) {
     for (const tl of tls) {
       if (sigKeys.has(tl.x + ',' + tl.z)) continue;
       const st = directionState(tl.x, tl.z, 'z', timeS);
-      if (tl.red && tl.red.material) tl.red.material.emissiveIntensity = st === 'red' ? 2.2 : 0;
-      if (tl.yellow && tl.yellow.material) tl.yellow.material.emissiveIntensity = st === 'yellow' ? 2.2 : 0;
-      if (tl.green && tl.green.material) tl.green.material.emissiveIntensity = st === 'green' ? 2.2 : 0;
+      if (tl.red && tl.red.material) tl.red.material.emissiveIntensity = st === 'red' ? 4.0 : 0;
+      if (tl.yellow && tl.yellow.material) tl.yellow.material.emissiveIntensity = st === 'yellow' ? 4.0 : 0;
+      if (tl.green && tl.green.material) tl.green.material.emissiveIntensity = st === 'green' ? 4.0 : 0;
     }
   }
 
   // (3) The directional heads: instanced, built once THREE arrives.
-  // Spots are fixed; only the instance colours change per frame.
+  // Spots are fixed; only the instance colours (and, on a state flip,
+  // the halo matrices) change per frame. Each corner spot gets a
+  // mast-arm twin over the lane centre, facing the same drivers.
   const spots = [];
   for (const j of SIGNAL_JUNCTIONS) {
-    for (const s of headSpots(j.x, j.z)) spots.push({ x: s.x, z: s.z, axis: s.axis, jx: j.x, jz: j.z });
+    for (const s of headSpots(j.x, j.z)) {
+      const f = s.axis === 'z' ? { x: 0, z: s.z > j.z ? -1 : 1 } : { x: s.x > j.x ? -1 : 1, z: 0 };
+      const yaw = Math.atan2(f.x, f.z);
+      spots.push({ x: s.x, z: s.z, axis: s.axis, jx: j.x, jz: j.z, fx: f.x, fz: f.z, yaw, mast: false, cornerIdx: -1 });
+      const mx = s.axis === 'z' ? j.x + Math.sign(s.x - j.x) * 3.5 : s.x;
+      const mz = s.axis === 'x' ? j.z + Math.sign(s.z - j.z) * 3.5 : s.z;
+      spots.push({ x: mx, z: mz, axis: s.axis, jx: j.x, jz: j.z, fx: f.x, fz: f.z, yaw, mast: true, cornerIdx: -1 });
+    }
+  }
+  // Corner heads only (poles, ped boxes, mast arms and risers hang
+  // off these); the mast-arm twins share the corner head's state.
+  const cornerSpots = [];
+  for (const s of spots) {
+    if (s.mast) continue;
+    s.cornerIdx = cornerSpots.length;
+    cornerSpots.push(s);
   }
   // Lens / ped colours, as hex: setColorAt needs THREE.Color objects,
   // which only exist once THREE is imported, so they are built with
   // the meshes and read back here per frame.
   let built = null; // { red, yellow, green, ped, lastSig, colors }
 
-  function applyLights(timeS) {
+  function applyLights(timeS, opts) {
     ctl.time = timeS;
     driveWorldHeads(timeS);
     if (!built) return;
+    // Daylight halo sizing. No caller passes the day/night factor yet
+    // (traffic3d calls update(time) only), so it defaults to the
+    // daylight tune — a ~1.7 m disc at 0.45 gain; pass
+    // { nightF: 0..1 } to grow it after dark (~2.6 m, gain 1.0).
+    // A night-factor change invalidates the state signatures so every
+    // halo is re-parked at the new size on the next pass.
+    const nightF = opts && typeof opts.nightF === 'number' ? Math.max(0, Math.min(1, opts.nightF)) : 0;
+    const nightQ = Math.round(nightF * 10);
+    if (nightQ !== built.lastNightQ) {
+      built.lastNightQ = nightQ;
+      built.lastSig.fill('');
+    }
+    const haloSize = 1.7 + nightF * 0.9;
+    const haloGain = 0.45 + nightF * 0.55;
     // One signature per spot; skip the colour writes when nothing
     // changed (states flip at most every 0.7 s per junction).
     let changed = false;
@@ -255,13 +333,31 @@ export function createTrafficLights(world) {
       built.red.setColorAt(i, st === 'red' ? cc.litRed : cc.unlit);
       built.yellow.setColorAt(i, st === 'yellow' ? cc.litYellow : cc.unlit);
       built.green.setColorAt(i, st === 'green' ? cc.litGreen : cc.unlit);
-      built.ped.setColorAt(i, ps === 'walk' ? cc.pedWalk : ps === 'clear' ? cc.pedStop : cc.pedOff);
+      // Ped boxes exist on corner heads only; mast twins share the
+      // corner head's state but have no box of their own.
+      if (!s.mast) built.ped.setColorAt(s.cornerIdx, ps === 'walk' ? cc.pedWalk : ps === 'clear' ? cc.pedStop : cc.pedOff);
+      // Halo: park the additive disc on the lit lens, facing the
+      // drivers, just past the lens surface (0.55 m out — the sphere
+      // is r 0.5, so any closer and the lens itself would occlude it).
+      // Its colour IS the lit colour, dimmed for daylight; exactly one
+      // lens is always lit, so the halo never needs an on/off flag.
+      const litY = st === 'red' ? LENS_Y.red : st === 'yellow' ? LENS_Y.yellow : LENS_Y.green;
+      const litCol = st === 'red' ? cc.litRed : st === 'yellow' ? cc.litYellow : cc.litGreen;
+      const d = built.dummy;
+      d.position.set(s.x + s.fx * 0.55, litY, s.z + s.fz * 0.55);
+      d.rotation.set(0, s.yaw, 0);
+      d.scale.set(haloSize, haloSize, 1);
+      d.updateMatrix();
+      built.halo.setMatrixAt(i, d.matrix);
+      built.halo.setColorAt(i, built.haloCol.copy(litCol).multiplyScalar(haloGain));
     }
     if (changed) {
       built.red.instanceColor.needsUpdate = true;
       built.yellow.instanceColor.needsUpdate = true;
       built.green.instanceColor.needsUpdate = true;
       built.ped.instanceColor.needsUpdate = true;
+      built.halo.instanceColor.needsUpdate = true;
+      built.halo.instanceMatrix.needsUpdate = true;
     }
   }
   ctl.update = applyLights;
@@ -273,11 +369,12 @@ export function createTrafficLights(world) {
   import('three').then((THREE) => {
     try {
       const dummy = new THREE.Object3D();
-      const n = spots.length;
+      const n = spots.length; // 176: 88 corner heads + 88 mast-arm twins
+      const nc = cornerSpots.length; // 88: corner heads only
       const poleMat = new THREE.MeshStandardMaterial({ color: '#2a2e33', roughness: 0.6, metalness: 0.5 });
       const housingMat = new THREE.MeshStandardMaterial({ color: '#111214', roughness: 0.5, metalness: 0.3 });
       const lensMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
-      const poles = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.22, 0.3, 5.5, 8), poleMat, n);
+      const poles = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.22, 0.3, 5.5, 8), poleMat, nc);
       const housings = new THREE.InstancedMesh(new THREE.BoxGeometry(0.55, 2.9, 0.55), housingMat, n);
       const red = new THREE.InstancedMesh(new THREE.SphereGeometry(0.5, 12, 10), lensMat, n);
       const yellow = new THREE.InstancedMesh(new THREE.SphereGeometry(0.5, 12, 10), lensMat, n);
@@ -285,33 +382,92 @@ export function createTrafficLights(world) {
       // Ped box: a small box on the pole, facing the junction; its
       // colour IS the walk signal (white walk, red hand, dark stop),
       // so the material is plain white and the instance colour does
-      // the talking.
+      // the talking. Corner heads only.
       const pedMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
-      const ped = new THREE.InstancedMesh(new THREE.BoxGeometry(0.9, 1.2, 0.3), pedMat, n);
-      spots.forEach((s, i) => {
+      const ped = new THREE.InstancedMesh(new THREE.BoxGeometry(0.9, 1.2, 0.3), pedMat, nc);
+      // Backplate (r8): a flat matte-black frame behind each housing,
+      // 0.2 m of dark border on every side — the consistent dark
+      // background a lit lens needs to keep contrast at noon.
+      const plateMat = new THREE.MeshStandardMaterial({ color: '#0a0a0c', roughness: 0.9, metalness: 0.05 });
+      const plates = new THREE.InstancedMesh(new THREE.BoxGeometry(0.95, 3.3, 0.06), plateMat, n);
+      // Visor (r8): a top-half tunnel hood over each lens. The
+      // cylinder is built around Y, thetaStart PI/2 length PI keeps
+      // the half where z <= 0, and rotateX(PI/2) maps that half onto
+      // y >= 0 with the axis along +Z — so after a yaw the hood sits
+      // over the top of the lens, open at the front and underneath,
+      // shading the lens from the sun without hiding it from below.
+      const visorGeo = new THREE.CylinderGeometry(0.58, 0.58, 0.8, 12, 1, true, Math.PI / 2, Math.PI);
+      visorGeo.rotateX(Math.PI / 2);
+      const visorMat = new THREE.MeshStandardMaterial({ color: '#0c0c0e', roughness: 0.85, metalness: 0.1, side: THREE.DoubleSide });
+      const visors = new THREE.InstancedMesh(visorGeo, visorMat, n * 3);
+      // Halo (r8): one additive radial disc per head, parked on the
+      // lit lens by applyLights. Unit plane — the per-state matrix
+      // scales it to the daylight/night size.
+      const haloMat = new THREE.MeshBasicMaterial({
+        map: glowTexture(THREE), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, color: '#ffffff',
+      });
+      const halo = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), haloMat, n);
+      halo.renderOrder = 3;
+      // Mast arm + riser (r8, corner heads only): a horizontal arm at
+      // 6.6 m from the pole top across to the lane-centre head, and a
+      // riser continuing the pole up to the arm. One arm per approach.
+      const arms = new THREE.InstancedMesh(new THREE.BoxGeometry(6.5, 0.18, 0.18), poleMat, nc);
+      const risers = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.18, 0.22, 1.3, 8), poleMat, nc);
+      // Corner heads: pole, ped box, mast arm, riser.
+      cornerSpots.forEach((s, i) => {
+        dummy.scale.set(1, 1, 1);
         dummy.position.set(s.x, 2.75, s.z);
         dummy.rotation.set(0, 0, 0);
         dummy.updateMatrix();
         poles.setMatrixAt(i, dummy.matrix);
-        dummy.position.set(s.x, 5.1, s.z);
-        dummy.updateMatrix();
-        housings.setMatrixAt(i, dummy.matrix);
-        dummy.position.set(s.x, 6.05, s.z);
-        dummy.updateMatrix();
-        red.setMatrixAt(i, dummy.matrix);
-        dummy.position.set(s.x, 5.1, s.z);
-        dummy.updateMatrix();
-        yellow.setMatrixAt(i, dummy.matrix);
-        dummy.position.set(s.x, 4.15, s.z);
-        dummy.updateMatrix();
-        green.setMatrixAt(i, dummy.matrix);
         dummy.position.set(s.x, 2.6, s.z);
         dummy.rotation.set(0, Math.atan2(s.jx - s.x, s.jz - s.z), 0);
         dummy.updateMatrix();
         ped.setMatrixAt(i, dummy.matrix);
         dummy.rotation.set(0, 0, 0);
+        const alongX = s.axis === 'z';
+        const midX = alongX ? (s.x + (s.jx + Math.sign(s.x - s.jx) * 3.5)) / 2 : s.x;
+        const midZ = alongX ? s.z : (s.z + (s.jz + Math.sign(s.z - s.jz) * 3.5)) / 2;
+        dummy.position.set(midX, 6.6, midZ);
+        dummy.rotation.set(0, alongX ? 0 : Math.PI / 2, 0);
+        dummy.updateMatrix();
+        arms.setMatrixAt(i, dummy.matrix);
+        dummy.position.set(s.x, 6.0, s.z);
+        dummy.rotation.set(0, 0, 0);
+        dummy.updateMatrix();
+        risers.setMatrixAt(i, dummy.matrix);
       });
-      for (const im of [poles, housings, red, yellow, green, ped]) {
+      // All heads (corner + mast-arm): housing, lenses, backplate,
+      // one visor per lens.
+      spots.forEach((s, i) => {
+        dummy.scale.set(1, 1, 1);
+        dummy.rotation.set(0, 0, 0);
+        dummy.position.set(s.x, 5.1, s.z);
+        dummy.updateMatrix();
+        housings.setMatrixAt(i, dummy.matrix);
+        dummy.position.set(s.x, LENS_Y.red, s.z);
+        dummy.updateMatrix();
+        red.setMatrixAt(i, dummy.matrix);
+        dummy.position.set(s.x, LENS_Y.yellow, s.z);
+        dummy.updateMatrix();
+        yellow.setMatrixAt(i, dummy.matrix);
+        dummy.position.set(s.x, LENS_Y.green, s.z);
+        dummy.updateMatrix();
+        green.setMatrixAt(i, dummy.matrix);
+        dummy.position.set(s.x - s.fx * 0.31, 5.1, s.z - s.fz * 0.31);
+        dummy.rotation.set(0, s.yaw, 0);
+        dummy.updateMatrix();
+        plates.setMatrixAt(i, dummy.matrix);
+        const ys = [LENS_Y.red, LENS_Y.yellow, LENS_Y.green];
+        for (let k = 0; k < 3; k++) {
+          dummy.position.set(s.x + s.fx * 0.25, ys[k], s.z + s.fz * 0.25);
+          dummy.rotation.set(0, s.yaw, 0);
+          dummy.updateMatrix();
+          visors.setMatrixAt(i * 3 + k, dummy.matrix);
+        }
+        dummy.rotation.set(0, 0, 0);
+      });
+      for (const im of [poles, housings, red, yellow, green, ped, plates, visors, halo, arms, risers]) {
         im.instanceMatrix.needsUpdate = true;
         im.frustumCulled = false;
         group.add(im);
@@ -337,12 +493,17 @@ export function createTrafficLights(world) {
       marks.frustumCulled = false;
       group.add(marks);
       built = {
-        red, yellow, green, ped,
+        red, yellow, green, ped, halo, dummy,
         lastSig: new Array(n).fill(''),
+        lastNightQ: -1,
+        haloCol: new THREE.Color('#ffffff'),
         colors: {
-          litRed: new THREE.Color('#ff2a1a'),
-          litYellow: new THREE.Color('#ffb52a'),
-          litGreen: new THREE.Color('#2aff5c'),
+          // Lit lenses punched past 1.0 (r8): a 1.0 red under a 3.0
+          // noon sun and ACES tonemapping reads grey-pink; 1.8 keeps
+          // the lit lens the brightest thing on the housing by day.
+          litRed: new THREE.Color('#ff2a1a').multiplyScalar(1.8),
+          litYellow: new THREE.Color('#ffb52a').multiplyScalar(1.8),
+          litGreen: new THREE.Color('#2aff5c').multiplyScalar(1.8),
           unlit: new THREE.Color('#26262a'),
           pedWalk: new THREE.Color('#ffffff'),
           pedStop: new THREE.Color('#ff3b30'),
@@ -351,6 +512,7 @@ export function createTrafficLights(world) {
       };
       ctl.built = true;
       ctl.heads = n;
+      ctl.mastHeads = nc;
       // Paint the initial states now: in shot mode traffic.update
       // never runs, so without this the lenses would render white
       // (no instance colour yet) instead of their t=0 red/green mix.

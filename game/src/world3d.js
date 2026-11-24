@@ -1455,6 +1455,132 @@ export function buildWorld(scene, CFG = CFG3D) {
     for (const m of neonMats) m.emissiveIntensity = 0.9 + v * 3.4;
   }
 
+  // ---- hospitals (r8, B4) ------------------------------------------------
+  // Death has somewhere to come back to: one general hospital in Old
+  // Town + one beach clinic. Both sit on ground the probe proved
+  // empty (no generated building, collider, palm or umbrella inside
+  // either footprint): the hospital takes the empty Old Town lot at
+  // block (100,-500), the clinic a bare stretch of sand west of the
+  // beach road. A local rng stream (rngH) feeds the facade painter so
+  // the main / B4 streams — and the city layout — are untouched.
+  // Each record carries its entrance spawn: on foot, on the forecourt,
+  // facing the doors. Exported as `hospitals` for the death system.
+  const rngH = mulberry32(20261124 ^ 0x48);
+  const hospitals = [];
+  {
+    const hospTex = facadeTextures('#e8e2d4', '#256b74', 0.35, rngH, 'concrete', rngH);
+    const hospMat = new THREE.MeshStandardMaterial({
+      map: hospTex.map, emissiveMap: hospTex.emissive,
+      emissive: new THREE.Color('#ffb45c'), emissiveIntensity: 0.15, roughness: 0.7,
+    });
+    facadeMats.push(hospMat);
+    const hosp = new THREE.Mesh(new THREE.BoxGeometry(64, 18, 40), hospMat);
+    hosp.position.set(52, 9, -500);
+    hosp.castShadow = true;
+    hosp.receiveShadow = true;
+    group.add(hosp);
+    const roofMatH = mat('#8f3d2c', { roughness: 0.9 });
+    box(66, 1.2, 42, roofMatH, 52, 18.6, -500);
+    // Lit red cross on the south face (left of the sign, clear of it)
+    // + fascia sign.
+    const crossMat = new THREE.MeshStandardMaterial({
+      color: '#c0392b', emissive: new THREE.Color('#ff2a1a'), emissiveIntensity: 1.6, roughness: 0.5,
+    });
+    neonMats.push(crossMat); // setNeonGlow keeps it lit at night
+    box(3, 9, 0.8, crossMat, 30, 12, -479.4);
+    box(9, 3, 0.8, crossMat, 30, 12, -479.4);
+    const signTex = canvasTexture(1024, 128, (g, w, h) => {
+      g.fillStyle = '#0e3b2e'; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#c0392b'; g.fillRect(28, 34, 60, 60); g.fillStyle = '#f2f6f8'; g.fillRect(52, 40, 12, 48); g.fillRect(34, 58, 48, 12);
+      g.fillStyle = '#f2f6f8'; g.font = 'bold 56px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle';
+      g.fillText('PALMA VERDE GENERAL', 110, h / 2 + 2);
+    });
+    const signMat = new THREE.MeshStandardMaterial({
+      map: signTex, emissiveMap: signTex, emissive: new THREE.Color('#ffffff'),
+      emissiveIntensity: 0.9, roughness: 0.7,
+    });
+    neonMats.push(signMat);
+    const sign = new THREE.Mesh(new THREE.PlaneGeometry(34, 4.25), signMat);
+    sign.position.set(52, 15.2, -479.5);
+    group.add(sign);
+    // Entrance canopy + glass doors on the south face.
+    box(16, 0.6, 6, mat('#0e3b2e', { roughness: 0.9 }), 52, 4.4, -477);
+    const doorMat = new THREE.MeshStandardMaterial({
+      color: '#1c2836', metalness: 0.55, roughness: 0.25,
+      emissive: new THREE.Color('#ff9a3c'), emissiveIntensity: 0.1,
+    });
+    facadeMats.push(doorMat);
+    const doors = new THREE.Mesh(new THREE.PlaneGeometry(8, 3.6), doorMat);
+    doors.position.set(52, 1.8, -479.7);
+    group.add(doors);
+    // Ambulance parked on the forecourt, clear of the spawn point.
+    const amb = new THREE.Group();
+    amb.position.set(78, 0, -464);
+    const ambWhite = mat('#f2f2ee', { roughness: 0.4 });
+    const ambBody = new THREE.Mesh(new THREE.BoxGeometry(6.5, 2.6, 2.6), ambWhite);
+    ambBody.position.y = 1.7; ambBody.castShadow = true;
+    const ambCab = new THREE.Mesh(new THREE.BoxGeometry(2, 1.9, 2.4), ambWhite);
+    ambCab.position.set(4, 1.35, 0); ambCab.castShadow = true;
+    const ambStripe = new THREE.Mesh(new THREE.BoxGeometry(6.6, 0.5, 2.7), crossMat);
+    ambStripe.position.y = 1.9;
+    const ambWheelMat = mat('#14181f', { roughness: 1 });
+    for (const [wx, wz] of [[-2.2, 1.35], [2.6, 1.35], [-2.2, -1.35], [2.6, -1.35]]) {
+      const wheel = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 0.4), ambWheelMat);
+      wheel.position.set(wx, 0.5, wz);
+      amb.add(wheel);
+    }
+    amb.add(ambBody, ambCab, ambStripe);
+    group.add(amb);
+    colliders.push({ x0: 20, z0: -520, x1: 84, z1: -480, h: 18 });
+    colliders.push({ x0: 74.5, z0: -465.5, x1: 81.5, z1: -462.5, h: 3 });
+    buildings.push({ mesh: hosp, district: districtAt(52, -500), h: 18, x: 52, z: -500, w: 64, d: 40 });
+    hospitals.push({
+      id: 'general', name: 'PALMA VERDE GENERAL', x: 52, z: -500,
+      spawn: { x: 52, z: -466, angle: -Math.PI / 2 },
+    });
+    // Beach clinic: small white block on the sand, entrance facing east
+    // (the beach road), red cross + CLINICA PLAYA sign on the east face.
+    const clinicTex = facadeTextures('#f2ede2', '#175e5a', 0.3, rngH, 'concrete', rngH);
+    const clinicMat = new THREE.MeshStandardMaterial({
+      map: clinicTex.map, emissiveMap: clinicTex.emissive,
+      emissive: new THREE.Color('#ffb45c'), emissiveIntensity: 0.15, roughness: 0.7,
+    });
+    facadeMats.push(clinicMat);
+    const clinic = new THREE.Mesh(new THREE.BoxGeometry(30, 8, 20), clinicMat);
+    clinic.position.set(-1520, 4, 300);
+    clinic.castShadow = true;
+    clinic.receiveShadow = true;
+    group.add(clinic);
+    box(32, 1, 22, roofMatH, -1520, 8.5, 300);
+    box(0.8, 5, 2.2, crossMat, -1504.4, 5.5, 288);
+    box(0.8, 2.2, 5, crossMat, -1504.4, 5.5, 288);
+    const clinicTex2 = canvasTexture(512, 128, (g, w, h) => {
+      g.fillStyle = '#0e3b2e'; g.fillRect(0, 0, w, h);
+      g.fillStyle = '#f2f6f8'; g.font = 'bold 52px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText('CLINICA PLAYA', w / 2, h / 2 + 2);
+    });
+    const clinicSignMat = new THREE.MeshStandardMaterial({
+      map: clinicTex2, emissiveMap: clinicTex2, emissive: new THREE.Color('#ffffff'),
+      emissiveIntensity: 0.9, roughness: 0.7,
+    });
+    neonMats.push(clinicSignMat);
+    const clinicSign = new THREE.Mesh(new THREE.PlaneGeometry(16, 4), clinicSignMat);
+    clinicSign.rotation.y = Math.PI / 2;
+    clinicSign.position.set(-1504.5, 6, 300);
+    group.add(clinicSign);
+    const clinicDoors = new THREE.Mesh(new THREE.PlaneGeometry(4, 3), doorMat);
+    clinicDoors.rotation.y = Math.PI / 2;
+    clinicDoors.position.set(-1504.8, 1.5, 300);
+    group.add(clinicDoors);
+    colliders.push({ x0: -1535, z0: 290, x1: -1505, z1: 310, h: 8 });
+    buildings.push({ mesh: clinic, district: null, h: 8, x: -1520, z: 300, w: 30, d: 20 });
+    hospitals.push({
+      id: 'clinic', name: 'CLINICA PLAYA', x: -1520, z: 300,
+      spawn: { x: -1494, z: 300, angle: Math.PI },
+    });
+    stats.hospitals = hospitals.length;
+  }
+
   return {
     group, roads: roadCentres, junctions, trafficLights, buildings, colliders,
     palms: palmSpots, lamps: lampHeads, lampSpots, ocean, beach, pier: pierGroup, wheel,
@@ -1462,5 +1588,6 @@ export function buildWorld(scene, CFG = CFG3D) {
     districtAt, isSolid, nearestRoadPoint, randomRoadSpot,
     updateTrafficLights, updateBeacon, setWindowGlow, setLampGlow, setNeonGlow,
     stats, // R7 build census: emptyLots, lotFills, storefronts, rooftopSigns, …
+    hospitals,
   };
 }

@@ -83,6 +83,11 @@ const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDraw
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+// r8 B6 follow-up: the shadow map re-renders the whole city every
+// frame; update it every other frame instead (autoUpdate off, the
+// tick sets needsUpdate on alternate frames). Shot mode sets
+// needsUpdate once before its single render, so shots keep shadows.
+renderer.shadowMap.autoUpdate = false;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -481,6 +486,23 @@ bannerEl.id = 'pv3d-banner';
 bannerEl.style.cssText = 'position:fixed;left:50%;top:26%;transform:translateX(-50%);z-index:30;display:none;text-align:center;pointer-events:none;font-family:system-ui,sans-serif;color:#f2f6f8;text-shadow:0 2px 8px rgba(0,0,0,.8)';
 document.body.appendChild(bannerEl);
 
+// WASTED overlay (r8, B4 — owned by main3d.js, NOT screens3d.js).
+// Greyscale is applied to the canvas itself; this layer carries the
+// vignette, the WASTED card and the fade-to-black. pointer-events none
+// so it can never trap input.
+const wastedEl = document.createElement('div');
+wastedEl.id = 'pv3d-wasted';
+wastedEl.style.cssText = 'position:fixed;inset:0;z-index:50;display:none;pointer-events:none;text-align:center;font-family:system-ui,sans-serif';
+wastedEl.innerHTML =
+  '<div style="position:absolute;inset:0;background:radial-gradient(ellipse at center, rgba(0,0,0,0) 40%, rgba(0,0,0,.55) 100%)"></div>' +
+  '<div style="position:absolute;left:0;right:0;top:36%;font-size:96px;font-weight:900;letter-spacing:.14em;color:#e8e8e8;text-shadow:0 4px 24px rgba(0,0,0,.9)">WASTED</div>' +
+  '<div id="pv3d-wasted-sub" style="position:absolute;left:0;right:0;top:56%;font-size:16px;letter-spacing:.25em;color:#ffb3ab;text-shadow:0 2px 8px rgba(0,0,0,.9)"></div>';
+document.body.appendChild(wastedEl);
+const wastedFadeEl = document.createElement('div');
+wastedFadeEl.id = 'pv3d-wasted-fade';
+wastedFadeEl.style.cssText = 'position:fixed;inset:0;z-index:51;display:none;pointer-events:none;background:#000;opacity:0;transition:opacity .6s ease';
+document.body.appendChild(wastedFadeEl);
+
 const extrasEl = document.createElement('div');
 extrasEl.id = 'shot-extras';
 extrasEl.style.cssText = 'position:fixed;inset:0;z-index:25;pointer-events:none;overflow:hidden';
@@ -787,10 +809,12 @@ function useCrewAbility(id) {
   }
 }
 
-function startGameFromTitle() {
+function startGameFromTitle(loadSave) {
   if (window.PalmaScreens3d && window.PalmaScreens3d.hideTitle) window.PalmaScreens3d.hideTitle();
   S.screen = 'playing';
-  const loaded = loadTitleSlot();
+  // NEW GAME passes loadSave === false: the selected slot is ignored
+  // and the game starts fresh. Anything else loads the slot.
+  const loaded = loadSave === false ? false : loadTitleSlot();
   if (!loaded && !S.missions.current && (!S.missions.completed || S.missions.completed.length === 0)) {
     Missions3d.startMission(S, 'the-debt', missionHooks);
   }
@@ -805,11 +829,58 @@ function loadTitleSlot() {
   return false;
 }
 
+// Title-menu dispatch (r8 follow-up to B1's mouse menu). B1's
+// hover/click writes the shared selection in screens3d.js, but
+// `lastMenuSel` there lives inside that file's IIFE — it is NOT a
+// window global, so main3d cannot read it. The selected row IS
+// readable in the DOM: B1 marks it .pv3d-title-menu-selected with
+// text '▸ CONTINUE' etc. Clicks fire a synthetic Enter, so click
+// and keyboard share this one dispatch. A missing element (or
+// unknown text) falls back to CONTINUE — the pre-existing Enter
+// behaviour, so keyboard Enter is unchanged when nothing is
+// selected. While the systems screen sits over the title (SETTINGS
+// open), Enter is ignored so it cannot start the game behind it.
+const TITLE_MENU_ITEMS = ['CONTINUE', 'NEW GAME', 'LOAD GAME', 'SETTINGS'];
+function titleMenuSelection() {
+  const el = document.querySelector('.pv3d-title-menu-selected');
+  if (!el) return 0;
+  const text = (el.textContent || '').replace('▸', '').trim().toUpperCase();
+  const idx = TITLE_MENU_ITEMS.indexOf(text);
+  return idx === -1 ? 0 : idx;
+}
+function dispatchTitleMenu() {
+  if (window.PalmaScreens3d && window.PalmaScreens3d.systemsVisible &&
+      window.PalmaScreens3d.systemsVisible()) return;
+  const sel = titleMenuSelection();
+  if (sel === 3) { // SETTINGS: systems screen on its settings tab
+    if (window.PalmaScreens3d) {
+      window.PalmaScreens3d.showSystems(S, city, { tab: 'settings', slots: Progress3d.listSaveSlots() });
+    }
+    return;
+  }
+  if (sel === 2) { // LOAD GAME: only the selected slot; empty stays on title
+    if (!loadTitleSlot()) {
+      const payload = { kind: 'LOAD GAME', title: 'SLOT EMPTY', name: 'Slot ' + ((S.titleSlot || 0) + 1) + ' has no save', reason: 'Pick another slot' };
+      showBanner(payload);
+      // The banner only expires while playing; clear it on a timer,
+      // but only if it is still this notice (a later banner wins).
+      setTimeout(function () { if (S.banner === payload) hideBanner(); }, 3500);
+      return;
+    }
+    if (window.PalmaScreens3d && window.PalmaScreens3d.hideTitle) window.PalmaScreens3d.hideTitle();
+    S.screen = 'playing';
+    pointAtStage();
+    snapCamera();
+    return;
+  }
+  startGameFromTitle(sel !== 1); // CONTINUE loads the slot, NEW GAME skips it
+}
+
 window.addEventListener('keydown', function (e) {
   if (e.code === 'Tab') return; // weapons.bindInput owns Tab
   keys.add(e.code);
   if (e.code === 'Enter') {
-    if (S.screen === 'title') { startGameFromTitle(); return; }
+    if (S.screen === 'title') { dispatchTitleMenu(); return; }
     if (S.banner) hideBanner();
   }
   if (S.screen === 'title') {
@@ -1251,6 +1322,7 @@ function setupShotMode() {
     window.__pv3d.screensProbe = 'skipped: shot=' + built.shot + ' screens=' + !!window.PalmaScreens3d;
   }
   renderShotExtras(built);
+  renderer.shadowMap.needsUpdate = true; // one shadow pass for the shot (autoUpdate is off)
   renderer.render(scene, camera);
   const sample = sampleCanvas();
   const info = {
@@ -1276,6 +1348,127 @@ function showTitleScreen() {
 }
 
 // ---------------------------------------------------------------------
+// Death + hospital revive (r8, B4) — the GTA "WASTED" beat.
+//   trigger: player.health hits 0 (see applyStreetDamage + the police
+//     ram damage in police3d.js contactHits — both real, no debug key)
+//   card: canvas snaps to greyscale + WASTED card, ~3 s hold
+//   fade: to black, then respawn on foot in front of the NEAREST
+//     hospital (world.hospitals), full health, wanted cleared,
+//     5% of cash capped at $5,000, weapons kept, mission failed.
+//   While dying the player cannot move, shoot or be re-hit: weapons,
+//     movement and police updates are skipped (traffic + day/night
+//     keep running behind the card); input flags are cleared so the
+//     player never respawns still firing or aiming.
+// ---------------------------------------------------------------------
+const WASTED_HOLD_S = 3.0;    // greyscale card hold before the fade
+const WASTED_RESPAWN_S = 3.8; // fade (0.6 s CSS) + margin, then respawn
+let death = null; // { elapsed, fee, hospital, faded } while dying
+let streetDamageT = 0; // cooldown between street-damage hits
+
+function nearestHospital(x, z) {
+  const list = world.hospitals || [];
+  if (!list.length) return null;
+  let best = list[0], bestD = Infinity;
+  for (const h of list) {
+    const d = (h.x - x) * (h.x - x) + (h.z - z) * (h.z - z);
+    if (d < bestD) { bestD = d; best = h; }
+  }
+  return best;
+}
+
+function startDeath() {
+  if (death) return;
+  const p = S.player;
+  const hospital = nearestHospital(p.x, p.z);
+  const fee = Math.min(5000, Math.floor((p.money || 0) * 0.05));
+  death = { elapsed: 0, fee: fee, hospital: hospital, faded: false };
+  // Leave any vehicle where it stands; the revive is always on foot.
+  const v = p.vehicle;
+  if (v) {
+    if (v.kind === 'heli') v.occupied = false;
+    else { v.traffic = !v.hero; v.driver = null; v.speed = 0; }
+    p.vehicle = null;
+  }
+  weapons.setAiming(false);
+  mouseHeld = false;
+  rmbHeld = false;
+  // Heat clears: units stand down (police.update also stands them
+  // down at wanted 0, but the beat must not wait on it).
+  police.setWanted(0, p);
+  S.wanted = 0;
+  for (const u of police.units || []) { u.leaving = true; u.leaveT = 0; }
+  if (police.heli) police.heli = null;
+  if (S.missions.current) Missions3d.failMission(S, 'wasted', missionHooks);
+  // The card: greyscale canvas + WASTED + hospital line.
+  canvas.style.filter = 'grayscale(1) brightness(.7) contrast(.9)';
+  const sub = document.getElementById('pv3d-wasted-sub');
+  if (sub) sub.textContent = (hospital ? hospital.name : 'PALMA VERDE GENERAL') +
+    (fee > 0 ? ' — HOSPITAL FEE $' + fee : ' — NO FEE');
+  wastedEl.style.display = 'block';
+  wastedFadeEl.style.display = 'block';
+  wastedFadeEl.style.opacity = '0';
+}
+
+function respawnFromDeath() {
+  if (!death) return;
+  const d = death;
+  const p = S.player;
+  const hospital = d.hospital || nearestHospital(p.x, p.z);
+  const spawn = hospital ? hospital.spawn : { x: city.spawns.player.x, z: city.spawns.player.z, angle: 0 };
+  p.money = Math.max(0, (p.money || 0) - d.fee);
+  p.health = 100;
+  p.x = spawn.x;
+  p.z = spawn.z;
+  p.angle = spawn.angle || 0;
+  p.aim = p.angle;
+  p.vehicle = null;
+  S.wanted = 0;
+  weapons.setAiming(false);
+  mouseHeld = false;
+  rmbHeld = false;
+  death = null;
+  canvas.style.filter = '';
+  wastedEl.style.display = 'none';
+  wastedFadeEl.style.display = 'none';
+  wastedFadeEl.style.opacity = '0';
+  snapCamera();
+  setHudMsg('REVIVED AT ' + (hospital ? hospital.name : 'PALMA VERDE GENERAL') +
+    (d.fee > 0 ? ' — FEE $' + d.fee : ' — NO FEE'), 4);
+}
+
+// Street damage (r8, B4): the two damage sources that can actually
+// put the player on the ground. (1) A moving traffic car that reaches
+// an on-foot player — 20 damage. Traffic normally brakes and steers
+// around the player (traffic3d carAhead), so this is the safety net
+// for stepping in front of a car already too close to stop; the live
+// source is (2) the police ram in police3d.js contactHits, -6 per
+// unit per second on foot, which is what grinds HP to 0 in a chase.
+// (3) A fighting ped's punch — 4 damage. One shared 1 s cooldown so
+// a pile-up cannot insta-kill. Parked cars (speed 0) never hit.
+function applyStreetDamage(dt) {
+  const p = S.player;
+  if (p.vehicle || death) return;
+  streetDamageT = Math.max(0, streetDamageT - dt);
+  if (streetDamageT > 0) return;
+  for (const car of S.cars || []) {
+    if (!car || Math.abs(car.speed || 0) < 2) continue;
+    if (Math.hypot(car.x - p.x, car.z - p.z) < 3.2) {
+      weapons.takeDamage(20);
+      streetDamageT = 1;
+      setHudMsg('HIT BY A CAR');
+      return;
+    }
+  }
+  for (const ped of S.peds || []) {
+    if (ped && ped.mode === 'fight' && Math.hypot(ped.x - p.x, ped.z - p.z) < 2.2) {
+      weapons.takeDamage(4);
+      streetDamageT = 1;
+      return;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
 // Game loop. Live mode steps input, physics, traffic, police,
 // missions, day/night, radio and the HUD at 15 Hz. Shot mode renders
 // one frozen frame and stops.
@@ -1283,11 +1476,13 @@ function showTitleScreen() {
 const clock = new THREE.Clock();
 let hudAcc = 0;
 let booted = false;
+let frameNo = 0; // shadow map updates on even frames only (see above)
 
 function tick() {
   requestAnimationFrame(tick);
   const dt = Math.min(clock.getDelta(), 0.1);
   if (shotMode) return;
+  if ((frameNo++ & 1) === 0) renderer.shadowMap.needsUpdate = true;
   S.time += dt;
   const p = S.player;
 
@@ -1304,6 +1499,20 @@ function tick() {
     S.radioStation = radio.stationIndex;
     S.radioTrack = radio.nowPlaying();
 
+    // While dying the world stays alive but the player is frozen:
+    // no aim, no movement, no police — only traffic + day/night
+    // behind the card, then the fade and the hospital revive.
+    if (death) {
+      death.elapsed += dt;
+      traffic.update(dt, p, { time: S.time, nightF: daynight.stars });
+      S.cars = traffic.cars;
+      S.peds = traffic.peds;
+      if (death.elapsed >= WASTED_HOLD_S && !death.faded) {
+        death.faded = true;
+        wastedFadeEl.style.opacity = '1';
+      }
+      if (death.elapsed >= WASTED_RESPAWN_S) respawnFromDeath();
+    } else {
     // Aim only while the right mouse button is held, on foot.
     // weapons.setAiming is the one writer of the aiming flag: the
     // loop never assigns p.aiming itself, so it cannot disagree
@@ -1330,7 +1539,7 @@ function tick() {
     else stepOnFoot(dt);
 
     // Traffic + police.
-    traffic.update(dt, p, { time: S.time });
+    traffic.update(dt, p, { time: S.time, nightF: daynight.stars });
     police.update(dt, p, {
       time: S.time,
       missionId: S.missions.current,
@@ -1364,6 +1573,11 @@ function tick() {
         else if (S.raceDeadline && S.time > S.raceDeadline) Missions3d.reportRace(S, missionHooks, false);
       }
     }
+
+    // Street damage, then the death trigger.
+    applyStreetDamage(dt);
+    if (S.player.health <= 0) startDeath();
+    } // end of the else (not dying)
 
     // District + standing for the HUD chip.
     const d = districtAt(p.x, p.z);
@@ -1452,6 +1666,7 @@ window.__palma3d = {
   chase: chase,
   hud: hud,
   get clockHours() { return clockHours; },
+  get deathActive() { return !!death; },
   setClockHours: function (h) { clockHours = h; daynight.setTime(h); }
 };
 

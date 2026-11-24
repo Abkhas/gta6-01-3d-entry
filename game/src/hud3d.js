@@ -394,6 +394,25 @@
     dom.speedoValue = el('div', 'pv3d-speedo-value', dom.speedo);
     dom.speedoDetail = el('div', 'pv3d-speedo-detail', dom.speedo);
 
+    // Full map overlay (M), hidden until opened. Same SA style as
+    // the radar, drawn large: the whole city, POI icons with names,
+    // the gold route, police blips and the white player arrow.
+    // Backing store 2x so the big map stays crisp.
+    dom.fullmap = el('div', 'pv3d-fullmap-overlay', stage);
+    dom.fullmap.style.display = 'none';
+    dom.fullmapTitle = el('div', 'pv3d-fullmap-title', dom.fullmap);
+    dom.fullmapTitle.textContent = 'PALMA VERDE — CITY MAP';
+    dom.fullmapCanvas = el('canvas', 'pv3d-fullmap-canvas', dom.fullmap);
+    dom.fullmapScale = 2;
+    dom.fullmapCanvas.width = 1120 * dom.fullmapScale;
+    dom.fullmapCanvas.height = 560 * dom.fullmapScale;
+    dom.fullmapCanvas.style.width = '1120px';
+    dom.fullmapCanvas.style.height = '560px';
+    dom.fullmapHint = el('div', 'pv3d-fullmap-hint', dom.fullmap);
+    dom.fullmapHint.textContent = 'M / ESC — CLOSE MAP  ·  WHITE ARROW IS YOU  ·  GOLD DIAMOND IS YOUR TARGET';
+    dom.fullmapLegend = el('div', 'pv3d-fullmap-legend', dom.fullmap);
+    dom.fullmapLegend.textContent = 'SHIRT CLOTHING  ·  DUMBBELL GYM  ·  SPRAY CAN SPRAY SHOP  ·  BURGER FOOD  ·  RED CROSS HOSPITAL  ·  HOUSE GARAGE';
+
     // Weapon wheel overlay (Tab), hidden until opened.
     dom.wheel = el('div', 'pv3d-wheel', stage);
     dom.wheel.style.display = 'none';
@@ -407,14 +426,17 @@
   }
 
   // ---- minimap ----------------------------------------------------------
-  // A 2D canvas: real street geometry from the city adapter (building
-  // footprints as brown blocks, roads as dark bands with pale centre
-  // lines), districts, a solid route to the waypoint diamond, red
-  // police blips, a blue player arrow, N compass and the
-  // district-standing chip. Health + armour bars sit in a strip along
-  // the bottom of the panel; a red border flashes while wanted.
-  // World coords are 3D metres: x east, z south; the map's vertical
-  // axis is z (south = down).
+  // A 2D canvas: real street geometry from the city adapter in the SA
+  // colour language (green blocks, white buildings, black roads, blue
+  // water, yellow sand), districts, a solid route to the waypoint
+  // diamond, red police blips, a white player arrow, an N compass,
+  // POI icons and the district-standing chip. Health + armour bars
+  // sit in a strip along the bottom of the panel; a red border
+  // flashes while wanted. The panel stays the r7 rectangle
+  // (230x172): the world->map transform and every position on it are
+  // byte-identical to r7 — only the style changed. World coords are
+  // 3D metres: x east, z south; the map's vertical axis is z
+  // (south = down).
 
   // Minimap render quality (r7 research): the panel stays 230x172 CSS
   // px on screen. The live canvas backing store is
@@ -482,18 +504,25 @@
   // into a 2x offscreen canvas; all of it is city geometry, so it
   // never changes while the city object is the same. (ctx, W, mapH
   // are CSS-pixel layout coords; the caller sets the transform.)
+  //
+  // SA STYLE (r8): the palette speaks San Andreas — green blocks,
+  // white buildings, black roads, blue water, yellow sand — painted
+  // over OUR city geometry. No SA art, no SA names, no SA map data:
+  // only the colour language. The world->map transform and every
+  // position on the map are byte-identical to r7; only colours change.
   function drawMinimapStatic(ctx, W, mapH, b, mx, mz, c3, shoreX, sandX, city, districts) {
-    ctx.fillStyle = '#16241b';
+    ctx.fillStyle = '#5c8a3d';
     ctx.fillRect(0, 0, W, mapH);
     // Ocean, then the sand band, along the west edge.
-    ctx.fillStyle = '#1f6f8f';
+    ctx.fillStyle = '#7a9cc6';
     ctx.fillRect(0, 0, Math.max(0, mx(shoreX)), mapH);
-    ctx.fillStyle = '#c9b078';
+    ctx.fillStyle = '#e3c878';
     ctx.fillRect(Math.max(0, mx(shoreX)), 0, Math.max(0, mx(sandX) - mx(shoreX)), mapH);
 
     // City blocks: real building footprints when the city adapter
     // carries them, otherwise the block cells of the road grid.
-    // Warm brown blocks on dark ground read as a street map at a glance.
+    // SA language: white buildings on green blocks, so the map reads
+    // as streets at a glance.
     var avenues = (city && city.avenues) || [];
     var streets = (city && city.streets) || [];
     var buildings = (city && city.buildings) || [];
@@ -503,7 +532,7 @@
         var bx0 = mx(bd.x0), bz0 = mz(bd.z0 !== undefined ? bd.z0 : bd.y0);
         var bx1 = mx(bd.x1), bz1 = mz(bd.z1 !== undefined ? bd.z1 : bd.y1);
         if (bx1 < 0 || bz1 < 0 || bx0 > W || bz0 > mapH) continue;
-        ctx.fillStyle = '#7a5c3e';
+        ctx.fillStyle = '#f4f4f0';
         fillRoundRect(ctx, bx0, bz0, Math.max(1, bx1 - bx0), Math.max(1, bz1 - bz0), 1);
       }
     } else {
@@ -512,7 +541,7 @@
           var cx0 = mx(avenues[gx]) + 1.5, cz0 = mz(streets[gz]) + 1.5;
           var cx1 = mx(avenues[gx + 1]) - 1.5, cz1 = mz(streets[gz + 1]) - 1.5;
           if (cx1 <= cx0 || cz1 <= cz0) continue;
-          ctx.fillStyle = ((gx + gz) % 2 === 0) ? '#6e5138' : '#7a5c3e';
+          ctx.fillStyle = ((gx + gz) % 2 === 0) ? '#63913f' : '#6a9a44';
           fillRoundRect(ctx, cx0, cz0, cx1 - cx0, cz1 - cz0, 1);
         }
       }
@@ -527,55 +556,53 @@
       ctx.fillStyle = (dist.accent || '#ffd166') + '2e';
       fillRoundRect(ctx, mx(x0), mz(z0), mx(x1) - mx(x0), mz(z1) - mz(z0), 2);
     }
-    // Roads: dark bands with a pale centre line, so the blocks read
-    // as blocks and the roads as roads. Highways run thicker, in gold.
-    // Centre lines are 1.5 CSS px minimum, offset +0.5 px so they sit
-    // on pixel centres instead of straddling two pixels.
+    // Roads: black bands, SA style. Ordinary streets are solid
+    // black; the two highways run thicker with a thin white centre
+    // line, so they still read as freeways. No pale centre lines on
+    // ordinary roads — the black-on-green is the SA look.
     for (var a = 0; a < avenues.length; a++) {
       var ax = mx(avenues[a]);
       var wideA = !!(c3 && avenues[a] === c3.HIGHWAY_EAST_X);
-      ctx.strokeStyle = '#10160f';
+      ctx.strokeStyle = '#0d0d0d';
       ctx.lineWidth = wideA ? 5 : 3;
       ctx.beginPath();
       ctx.moveTo(ax, 0);
       ctx.lineTo(ax, mapH);
       ctx.stroke();
-      ctx.strokeStyle = wideA ? '#e8c53a' : 'rgba(232,220,190,0.75)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(ax + 0.5, 0);
-      ctx.lineTo(ax + 0.5, mapH);
-      ctx.stroke();
+      if (wideA) {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(ax + 0.5, 0);
+        ctx.lineTo(ax + 0.5, mapH);
+        ctx.stroke();
+      }
     }
     for (var s = 0; s < streets.length; s++) {
       var sz = mz(streets[s]);
       var wideS = !!(c3 && streets[s] === c3.HIGHWAY_NORTH_Z);
-      ctx.strokeStyle = '#10160f';
+      ctx.strokeStyle = '#0d0d0d';
       ctx.lineWidth = wideS ? 5 : 3;
       ctx.beginPath();
       ctx.moveTo(0, sz);
       ctx.lineTo(W, sz);
       ctx.stroke();
-      ctx.strokeStyle = wideS ? '#e8c53a' : 'rgba(232,220,190,0.75)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(0, sz + 0.5);
-      ctx.lineTo(W, sz + 0.5);
-      ctx.stroke();
+      if (wideS) {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(0, sz + 0.5);
+        ctx.lineTo(W, sz + 0.5);
+        ctx.stroke();
+      }
     }
     if (city && typeof city.beachRoadX === 'number') {
       var brx = mx(city.beachRoadX);
-      ctx.strokeStyle = '#10160f';
+      ctx.strokeStyle = '#0d0d0d';
       ctx.lineWidth = 3;
       ctx.beginPath();
       ctx.moveTo(brx, 0);
       ctx.lineTo(brx, mapH);
-      ctx.stroke();
-      ctx.strokeStyle = 'rgba(232,220,190,0.75)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(brx + 0.5, 0);
-      ctx.lineTo(brx + 0.5, mapH);
       ctx.stroke();
     }
     // Landmarks: the wheel, the pier, the tower.
@@ -630,6 +657,136 @@
     return off;
   }
 
+  // ---- points of interest (r8, SA radar style) ----------------------
+  // Canvas glyphs only — no images, no SA art. Names and spots are
+  // OUR city: shop names invented here, positions on our own grid
+  // (block centres, never on a road centreline). The hospital spots
+  // are the real B4 meshes: PALMA VERDE GENERAL at (52,-500) and the
+  // beach clinic CLINICA PLAYA at (-1520,300) in world3d.js. When the
+  // city adapter carries `hospitals` (B4's export) those coordinates
+  // win over the fallback constants below, so the icons track the
+  // meshes if B4 ever moves them.
+  var POIS = [
+    { kind: 'clothing', name: 'TELA VIVA', x: -500, z: -300 },
+    { kind: 'gym', name: 'GIMNASIO BRISA', x: -1100, z: 700 },
+    { kind: 'spray', name: 'PINTURA SOL', x: 300, z: 700 },
+    { kind: 'burger', name: 'BURGER SOL', x: -1300, z: 500 },
+    { kind: 'garage', name: "NADIA'S GARAGE", x: -900, z: -900 },
+    { kind: 'hospital', name: 'PALMA VERDE GENERAL', hid: 'general', x: 52, z: -500 },
+    { kind: 'hospital', name: 'CLINICA PLAYA', hid: 'clinic', x: -1520, z: 300 }
+  ];
+
+  function poiList(city) {
+    var hosps = (city && city.hospitals) || [];
+    if (!hosps.length) return POIS;
+    return POIS.map(function (poi) {
+      if (!poi.hid) return poi;
+      for (var i = 0; i < hosps.length; i++) {
+        if (hosps[i].id === poi.hid) {
+          return { kind: poi.kind, name: poi.name, hid: poi.hid, x: hosps[i].x, z: hosps[i].z };
+        }
+      }
+      return poi;
+    });
+  }
+
+  // One POI glyph at map point (x, y), disc radius r. Glyphs are
+  // drawn in unit space (-1..1) so the same painter serves the radar
+  // (r 7) and the full map (r 13). A dark disc backs every glyph so
+  // it reads over white buildings; the hospital is the exception — a
+  // white disc with a red cross, the universal hospital mark.
+  function drawPoiIcon(ctx, x, y, r, kind) {
+    ctx.save();
+    ctx.translate(x, y);
+    if (kind === 'hospital') {
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#111111';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = '#d21f14';
+      ctx.fillRect(-r * 0.22, -r * 0.62, r * 0.44, r * 1.24);
+      ctx.fillRect(-r * 0.62, -r * 0.22, r * 1.24, r * 0.44);
+      ctx.restore();
+      return;
+    }
+    ctx.fillStyle = 'rgba(10,14,10,0.78)';
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.scale(r, r);
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#ffffff';
+    if (kind === 'clothing') {
+      // T-shirt: body, sleeves, collar.
+      ctx.beginPath();
+      ctx.moveTo(-0.45, -0.55);
+      ctx.lineTo(-0.85, -0.35);
+      ctx.lineTo(-0.6, 0.05);
+      ctx.lineTo(-0.45, -0.05);
+      ctx.lineTo(-0.45, 0.6);
+      ctx.lineTo(0.45, 0.6);
+      ctx.lineTo(0.45, -0.05);
+      ctx.lineTo(0.6, 0.05);
+      ctx.lineTo(0.85, -0.35);
+      ctx.lineTo(0.45, -0.55);
+      ctx.quadraticCurveTo(0, -0.25, -0.45, -0.55);
+      ctx.closePath();
+      ctx.fill();
+    } else if (kind === 'gym') {
+      // Dumbbell: two plates and a bar.
+      ctx.fillRect(-0.85, -0.5, 0.28, 1.0);
+      ctx.fillRect(0.57, -0.5, 0.28, 1.0);
+      ctx.fillRect(-0.57, -0.16, 1.14, 0.32);
+    } else if (kind === 'spray') {
+      // Spray can: body, nozzle, three spray dots.
+      ctx.fillRect(-0.42, -0.05, 0.84, 0.65);
+      ctx.fillRect(-0.14, -0.4, 0.28, 0.35);
+      ctx.beginPath();
+      ctx.arc(-0.3, -0.62, 0.09, 0, Math.PI * 2);
+      ctx.arc(0.05, -0.72, 0.09, 0, Math.PI * 2);
+      ctx.arc(0.38, -0.58, 0.09, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (kind === 'burger') {
+      // Burger: top bun, patty, bottom bun, dark gaps between.
+      ctx.beginPath();
+      ctx.arc(0, 0.12, 0.62, Math.PI, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillRect(-0.62, 0.22, 1.24, 0.18);
+      ctx.fillRect(-0.55, 0.5, 1.1, 0.16);
+    } else if (kind === 'garage') {
+      // Garage: pitched roof, body, dark door.
+      ctx.beginPath();
+      ctx.moveTo(-0.7, -0.05);
+      ctx.lineTo(0, -0.65);
+      ctx.lineTo(0.7, -0.05);
+      ctx.lineTo(0.55, -0.05);
+      ctx.lineTo(0.55, 0.6);
+      ctx.lineTo(-0.55, 0.6);
+      ctx.lineTo(-0.55, -0.05);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#0a0e0a';
+      ctx.fillRect(-0.3, 0.08, 0.6, 0.52);
+    } else {
+      // Unknown kind: plain dot, never invisible.
+      ctx.beginPath();
+      ctx.arc(0, 0, 0.3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   function drawMinimap(dom, state, city) {
     var canvas = dom.minimap;
     var ctx = canvas.getContext('2d');
@@ -676,17 +833,30 @@
     // District labels: drawn per frame after the downscale, in a real
     // font at 10px CSS, so they stay crisp — never baked into the
     // static layer. Same centres as before, only the size changes.
-    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    // White text with a dark outline, so it reads over white
+    // buildings as well as green blocks.
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.lineWidth = 3;
     ctx.font = 'bold 10px system-ui, sans-serif';
     ctx.textAlign = 'center';
     for (var d = 0; d < districts.length; d++) {
       var dist = districts[d];
       var x0 = dist.x0, z0 = (dist.z0 !== undefined ? dist.z0 : dist.y0);
       var x1 = dist.x1, z1 = (dist.z1 !== undefined ? dist.z1 : dist.y1);
-      ctx.fillText((dist.short || dist.name || '').toUpperCase(),
-        (mx(x0) + mx(x1)) / 2, (mz(z0) + mz(z1)) / 2);
+      var dLabel = (dist.short || dist.name || '').toUpperCase();
+      var dCx = (mx(x0) + mx(x1)) / 2, dCy = (mz(z0) + mz(z1)) / 2;
+      ctx.strokeText(dLabel, dCx, dCy);
+      ctx.fillText(dLabel, dCx, dCy);
     }
     ctx.textAlign = 'left';
+
+    // Points of interest: SA-style canvas glyphs on our own city
+    // spots (see POIS). Drawn under the route and blips.
+    var pois = poiList(city);
+    for (var pi = 0; pi < pois.length; pi++) {
+      drawPoiIcon(ctx, mx(pois[pi].x), mz(pois[pi].z), 7, pois[pi].kind);
+    }
 
     // Route: a solid gold line with a pale casing, player to the
     // mission marker along the grid, ending in a waypoint diamond
@@ -758,13 +928,15 @@
         ctx.fill();
       }
     }
-    // Player arrow: blue, white-outlined, pointing where Rey heads.
+    // Player arrow: white, dark-outlined, pointing where Rey heads.
+    // SA style — the arrow rotates with the facing, the map stays
+    // north-up. Same shape and size as r7, only the colours change.
     var ang = (p.vehicle ? p.vehicle.angle : p.angle) || 0;
     ctx.save();
     ctx.translate(mx(p.x), mz(pz));
     ctx.rotate(ang);
-    ctx.fillStyle = '#2f9bff';
-    ctx.strokeStyle = '#fff';
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#111111';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(11, 0);
@@ -793,6 +965,237 @@
       ctx.lineWidth = 3;
       ctx.strokeRect(1.5, 1.5, W - 3, H - 3);
     }
+  }
+
+  // ---- full map (M key, r8) --------------------------------------------
+  // The SA full map, rectangular like the reference: the whole city
+  // at 1120x560, same static painter as the radar (same SA colours,
+  // same geometry source), with bigger labels, named POI icons, the
+  // gold route, police blips and the white player arrow. The static
+  // layer is cached per city at 2x, like the radar's; only the
+  // dynamic layer redraws per frame while the map is open.
+  var FULLMAP_W = 1120, FULLMAP_H = 560;
+  var FULLMAP_STATIC_SCALE = 2;
+  var fullmapStatic = { city: null, canvas: null };
+
+  function fullmapStaticCanvas(city, W, mapH, b, mx, mz, c3, shoreX, sandX, districts) {
+    if (fullmapStatic.canvas && fullmapStatic.city === city) return fullmapStatic.canvas;
+    var off = null;
+    try {
+      if (typeof document === 'undefined' || !document.createElement) return null;
+      off = document.createElement('canvas');
+      off.width = Math.round(W * FULLMAP_STATIC_SCALE);
+      off.height = Math.round(mapH * FULLMAP_STATIC_SCALE);
+      var octx = off.getContext('2d');
+      if (!octx) return null;
+      octx.setTransform(FULLMAP_STATIC_SCALE, 0, 0, FULLMAP_STATIC_SCALE, 0, 0);
+      octx.lineJoin = 'round';
+      octx.lineCap = 'round';
+      drawMinimapStatic(octx, W, mapH, b, mx, mz, c3, shoreX, sandX, city, districts);
+    } catch (e) {
+      return null;
+    }
+    fullmapStatic.city = city;
+    fullmapStatic.canvas = off;
+    return off;
+  }
+
+  function drawFullmap(dom, state, city) {
+    var canvas = dom.fullmapCanvas;
+    var ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    var W = FULLMAP_W, H = FULLMAP_H;
+    var scale = dom.fullmapScale || (canvas.width / W) || 1;
+    var b = mapBounds(city);
+    function mx(wx) { return ((wx - b.x0) / (b.x1 - b.x0)) * W; }
+    function mz(wz) { return ((wz - b.z0) / (b.z1 - b.z0)) * H; }
+    var c3 = config3d();
+    var shoreX = c3 ? c3.SHORE_X : b.x0 + 180;
+    var sandX = c3 ? c3.BEACH_X : b.x0 + 300;
+    var districts = (city && city.districts) ||
+      (c3 ? c3.DISTRICTS : ((config() || {}).DISTRICTS || []));
+    var p = state.player;
+    var pz = (p.z !== undefined ? p.z : p.y);
+    var pulse = 0.5 + 0.5 * Math.sin((state.time || 0) * 5);
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
+    var staticCanvas = fullmapStaticCanvas(city, W, H, b, mx, mz, c3, shoreX, sandX, districts);
+    if (staticCanvas) {
+      ctx.drawImage(staticCanvas, 0, 0, W, H);
+    } else {
+      drawMinimapStatic(ctx, W, H, b, mx, mz, c3, shoreX, sandX, city, districts);
+    }
+
+    // District labels, large, white with a dark outline.
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.lineWidth = 4;
+    ctx.font = 'bold 14px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    for (var d = 0; d < districts.length; d++) {
+      var dist = districts[d];
+      var x0 = dist.x0, z0 = (dist.z0 !== undefined ? dist.z0 : dist.y0);
+      var x1 = dist.x1, z1 = (dist.z1 !== undefined ? dist.z1 : dist.y1);
+      var label = (dist.short || dist.name || '').toUpperCase();
+      var cx = (mx(x0) + mx(x1)) / 2, cy = (mz(z0) + mz(z1)) / 2;
+      ctx.strokeText(label, cx, cy);
+      ctx.fillText(label, cx, cy);
+    }
+
+    // POI icons with names. The name goes right of the icon, or left
+    // when the icon sits near the right edge.
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    var pois = poiList(city);
+    for (var pi = 0; pi < pois.length; pi++) {
+      var poi = pois[pi];
+      var px = mx(poi.x), py = mz(poi.z);
+      drawPoiIcon(ctx, px, py, 13, poi.kind);
+      ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+      ctx.lineWidth = 3;
+      var nameX = (px > W - 180) ? px - 18 - ctx.measureText(poi.name).width : px + 18;
+      ctx.strokeText(poi.name, nameX, py + 4);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(poi.name, nameX, py + 4);
+    }
+    ctx.textAlign = 'left';
+
+    // Route: gold line with a pale casing, player to the waypoint.
+    var target = state.missionTarget;
+    if (target) {
+      var tz = (target.z !== undefined ? target.z : target.y);
+      var tx = mx(target.x), ty = mz(tz);
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 6;
+      ctx.beginPath();
+      ctx.moveTo(mx(p.x), mz(pz));
+      ctx.lineTo(tx, mz(pz));
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
+      ctx.strokeStyle = '#ffc21c';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(mx(p.x), mz(pz));
+      ctx.lineTo(tx, mz(pz));
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,194,28,' + (0.5 + 0.5 * pulse).toFixed(2) + ')';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(tx, ty, 13 + 3 * pulse, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = '#ffc21c';
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.save();
+      ctx.translate(tx, ty);
+      ctx.rotate(Math.PI / 4);
+      ctx.fillRect(-9, -9, 18, 18);
+      ctx.strokeRect(-9, -9, 18, 18);
+      ctx.restore();
+    }
+
+    // Police blips, same language as the radar, larger.
+    if (state.police) {
+      var units = state.police.units || [];
+      for (var u = 0; u < units.length; u++) {
+        var car = units[u].car || units[u].ped || units[u];
+        var ux = car.x || 0, uz = (car.z !== undefined ? car.z : (car.y || 0));
+        ctx.fillStyle = '#ff3b30';
+        ctx.beginPath();
+        ctx.arc(mx(ux), mz(uz), 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(mx(ux), mz(uz), 5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (state.police.heli) {
+        var hx = state.police.heli.x, hz = (state.police.heli.z !== undefined ? state.police.heli.z : state.police.heli.y);
+        ctx.strokeStyle = '#ff3b30';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(mx(hx), mz(hz), 9, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = '#ff3b30';
+        ctx.beginPath();
+        ctx.arc(mx(hx), mz(hz), 3.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Player arrow, white, larger than the radar's, rotating.
+    var ang = (p.vehicle ? p.vehicle.angle : p.angle) || 0;
+    ctx.save();
+    ctx.translate(mx(p.x), mz(pz));
+    ctx.rotate(ang);
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(18, 0);
+    ctx.lineTo(-13, -11);
+    ctx.lineTo(-6, 0);
+    ctx.lineTo(-13, 11);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    // N marker, top-right corner of the map.
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.lineWidth = 4;
+    ctx.font = 'bold 18px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.strokeText('N', W - 22, 28);
+    ctx.fillText('N', W - 22, 28);
+    ctx.textAlign = 'left';
+  }
+
+  // Full-map open state + the M key. hud3d.js loads as a classic
+  // script before main3d.js (a deferred module), so this listener
+  // registers BEFORE main3d's keydown handler: when the map is open
+  // and the player presses Escape, stopImmediatePropagation keeps
+  // main3d from also opening the pause menu. M is free everywhere —
+  // main3d binds Tab/Enter/arrows/Escape/E/Q/Z/X/V/F9/T and
+  // weapons3d binds Tab/digits/R — so no other file needs a change.
+  var fullmapOpen = false;
+  var fullmapDom = null;
+  var fullmapLastState = null;
+
+  function setFullmapOpen(open) {
+    fullmapOpen = !!open;
+    if (fullmapDom && fullmapDom.fullmap) {
+      fullmapDom.fullmap.style.display = fullmapOpen ? '' : 'none';
+    }
+  }
+
+  function onFullmapKeyDown(e) {
+    if (!fullmapDom || !e || e.repeat) return;
+    var playing = fullmapLastState && fullmapLastState.screen === 'playing';
+    if (e.code === 'KeyM') {
+      if (playing || fullmapOpen) {
+        setFullmapOpen(!fullmapOpen);
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+      }
+    } else if (e.code === 'Escape' && fullmapOpen) {
+      setFullmapOpen(false);
+      if (typeof e.preventDefault === 'function') e.preventDefault();
+      if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+    }
+  }
+
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    try { window.addEventListener('keydown', onFullmapKeyDown); } catch (err) { /* key hook is best-effort */ }
   }
 
   // ---- per-frame update -------------------------------------------------
@@ -895,6 +1298,10 @@
 
     // Minimap + standing chip.
     drawMinimap(dom, state, city);
+    // Full map: the M key toggles it; redrawn per frame while open
+    // so the arrow, blips and route track the live game.
+    fullmapLastState = state;
+    if (fullmapOpen) drawFullmap(dom, state, city);
     dom.minimapWrap.classList.toggle('pv3d-minimap-wanted', (state.wanted || 0) > 0);
     var dVal = null;
     if (state.district && state.standing && typeof state.standing[state.district.name] === 'number') {
@@ -995,6 +1402,7 @@
     if (!host) return null;
     host.innerHTML = '';
     var dom = buildDom(host);
+    fullmapDom = dom;
     var api = {
       element: host,
       stage: dom.stage,
@@ -1016,7 +1424,10 @@
       moneyStr: moneyStr,
       clockStr: clockStr,
       standingLabel: standingLabel,
-      conditionLabel: conditionLabel
+      conditionLabel: conditionLabel,
+      isFullmapOpen: function () { return fullmapOpen; },
+      setFullmapOpen: setFullmapOpen,
+      toggleFullmap: function () { setFullmapOpen(!fullmapOpen); }
     };
     return api;
   }
@@ -1073,8 +1484,13 @@
       '.pv3d-minimap-wrap{position:absolute}',
       '.pv3d-minimap{display:block;background:rgba(8,18,14,0.8)}',
       '.pv3d-minimap-chip{position:absolute;left:4px;top:4px;background:rgba(8,12,18,0.85);color:#ffd166;font-size:10px;font-weight:700;padding:2px 6px}',
-      '.pv3d-minimap-compass{position:absolute;right:6px;top:4px;color:#fff;font-size:11px;font-weight:700}',
+      '.pv3d-minimap-compass{position:absolute;right:6px;top:4px;color:#fff;font-size:11px;font-weight:700;text-shadow:0 1px 2px #000,0 0 3px #000}',
       '.pv3d-minimap-wanted{outline:2px solid #ff3b30;outline-offset:-2px}',
+      '.pv3d-fullmap-overlay{position:absolute;left:0;top:0;width:1280px;height:720px;background:rgba(4,8,12,0.88);z-index:5}',
+      '.pv3d-fullmap-title{position:absolute;left:0;top:14px;width:1280px;text-align:center;font-size:20px;font-weight:700;color:#ffd166;letter-spacing:3px}',
+      '.pv3d-fullmap-canvas{position:absolute;left:80px;top:56px;border:2px solid rgba(255,209,102,0.6)}',
+      '.pv3d-fullmap-hint{position:absolute;left:0;top:630px;width:1280px;text-align:center;font-size:13px;font-weight:700;color:#ffd166}',
+      '.pv3d-fullmap-legend{position:absolute;left:0;top:654px;width:1280px;text-align:center;font-size:11px;color:#c9d2e0}',
       '.pv3d-dialogue{padding:8px 10px 8px 66px}',
       '.pv3d-dialogue-portrait{position:absolute;left:12px;top:50%;margin-top:-22px;width:44px;height:44px;border-radius:50%;background:#c94f3d;color:#fff;font-size:16px;font-weight:700;display:flex;align-items:center;justify-content:center}',
       '.pv3d-dialogue-name{font-size:13px;font-weight:700;color:#ffd166}',
@@ -1129,6 +1545,9 @@
     clockStr: clockStr,
     standingLabel: standingLabel,
     conditionLabel: conditionLabel,
-    rankName: rankName
+    rankName: rankName,
+    isFullmapOpen: function () { return fullmapOpen; },
+    setFullmapOpen: setFullmapOpen,
+    toggleFullmap: function () { setFullmapOpen(!fullmapOpen); }
   };
 })();

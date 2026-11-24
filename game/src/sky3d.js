@@ -5,7 +5,7 @@
 // from config3d.js: sky colours, sun position, lights and fog together.
 
 import * as THREE from 'three';
-import { CFG3D } from './config3d.js';
+import { CFG3D, createDprGovernor } from './config3d.js';
 
 function softBlobTexture() {
   const c = document.createElement('canvas');
@@ -154,15 +154,23 @@ export function createSky(scene) {
 
   // Lights the grades drive: one sun (directional, shadow-casting) and
   // one hemisphere fill so night is never near-black.
+  // SHADOW BOX (r8 B6): was a 2048 map over the whole ±1600 m city —
+  // every caster in 3.2 km re-rendered into the shadow map every
+  // frame at 1.56 m/texel (mush). Now a 1024 map over a ±160 m box
+  // (~320 m, 0.31 m/texel — ~5x sharper) that FOLLOWS the player
+  // (applyShadowFollow, below): only near-player casters enter the
+  // shadow pass. Constants live in CFG3D.PERF.
   const sunLight = new THREE.DirectionalLight('#fff1cf', 2.4);
   sunLight.castShadow = true;
-  sunLight.shadow.mapSize.set(2048, 2048);
-  sunLight.shadow.camera.left = -1600;
-  sunLight.shadow.camera.right = 1600;
-  sunLight.shadow.camera.top = 1600;
-  sunLight.shadow.camera.bottom = -1600;
+  sunLight.shadow.mapSize.set(CFG3D.PERF.SHADOW_MAP_SIZE, CFG3D.PERF.SHADOW_MAP_SIZE);
+  const SH = CFG3D.PERF.SHADOW_HALF;
+  sunLight.shadow.camera.left = -SH;
+  sunLight.shadow.camera.right = SH;
+  sunLight.shadow.camera.top = SH;
+  sunLight.shadow.camera.bottom = -SH;
   sunLight.shadow.camera.near = 100;
-  sunLight.shadow.camera.far = 9000;
+  sunLight.shadow.camera.far = 2600;
+  sunLight.shadow.camera.updateProjectionMatrix();
   sunLight.shadow.bias = -0.0004;
   scene.add(sunLight);
   scene.add(sunLight.target);
@@ -192,6 +200,70 @@ function placeBody(body, elevationDeg, azimuthDeg) {
 
 function lerpColor(a, b, t) {
   return new THREE.Color(a).lerp(new THREE.Color(b), t);
+}
+
+// ---- player-following shadow camera (r8 B6) -------------------------
+// The 320 m shadow box is useless if it stays centred on the map
+// origin while the player drives 1 km away, so the light + target
+// track a focus point. Priority: (1) an explicit focus set via
+// setShadowFocus (coordinator/shots can pin it); (2) the live player
+// position from the handle main3d exposes (window.__palma3d.state,
+// vehicle-aware — the hero car/heli when driving/flying); (3) the
+// chase camera position (a few metres behind the hero, a good proxy);
+// (4) the player spawn, so the title screen still has shadows before
+// the first tick. All window reads are guarded — in Node / tests
+// `window` is absent and the default applies. The focus snaps to an
+// 8 m grid so a slow drive does not shimmer the shadow map, and the
+// light/target only move when the snapped focus actually changes.
+function resolveShadowFocus(scene) {
+  const sky = scene.userData.palmaSky;
+  if (sky && sky.shadowFocus) return sky.shadowFocus;
+  try {
+    if (typeof window !== 'undefined' && window.__palma3d) {
+      const p = window.__palma3d.state && window.__palma3d.state.player;
+      if (p) {
+        if (p.vehicle && typeof p.vehicle.x === 'number' && typeof p.vehicle.z === 'number') {
+          return { x: p.vehicle.x, z: p.vehicle.z };
+        }
+        if (typeof p.x === 'number' && typeof p.z === 'number') return { x: p.x, z: p.z };
+      }
+      const cam = window.__palma3d.camera;
+      if (cam && cam.position && typeof cam.position.x === 'number') {
+        return { x: cam.position.x, z: cam.position.z };
+      }
+    }
+  } catch (e) { /* fall through to the default focus */ }
+  return CFG3D.PERF.SHADOW_DEFAULT_FOCUS;
+}
+
+function applyShadowFollow(scene) {
+  const sky = scene.userData.palmaSky;
+  if (!sky || !sky.sunLight || !sky.sun) return;
+  const f = resolveShadowFocus(scene);
+  const snap = CFG3D.PERF.SHADOW_SNAP;
+  const fx = Math.round(f.x / snap) * snap;
+  const fz = Math.round(f.z / snap) * snap;
+  if (sky.shadowApplied && sky.shadowApplied.x === fx && sky.shadowApplied.z === fz) return;
+  // Sun direction: the sun body sits 5200 m out; the light rides
+  // SHADOW_FOLLOW_DIST along the same ray, so near/far stay tight
+  // (100..2600) instead of spanning the whole sky.
+  const dir = sky.sun.position.clone().normalize();
+  const D = CFG3D.PERF.SHADOW_FOLLOW_DIST;
+  sky.sunLight.position.set(fx + dir.x * D, Math.max(dir.y * D, 300), fz + dir.z * D);
+  sky.sunLight.target.position.set(fx, 0, fz);
+  sky.sunLight.target.updateMatrixWorld();
+  sky.shadowApplied = { x: fx, z: fz };
+}
+
+// Pin the shadow box to a world (x, z) — e.g. a staged shot's hero.
+// Clears on the next call; pass null to return to live tracking.
+export function setShadowFocus(scene, x, z) {
+  const sky = scene.userData.palmaSky;
+  if (!sky) return;
+  if (x == null || z == null) { sky.shadowFocus = null; sky.shadowApplied = null; return; }
+  sky.shadowFocus = { x: +x, z: +z };
+  sky.shadowApplied = null;
+  applyShadowFollow(scene);
 }
 
 // Apply one grade to the sky, lights and fog. `grade` is a GRADES entry
@@ -240,13 +312,21 @@ export function setTimeOfDay(scene, grade, world = null) {
 
   sky.sunLight.color.set(fg.sunColor);
   sky.sunLight.intensity = fg.sunIntensity;
-  sky.sunLight.position.copy(sky.sun.position).multiplyScalar(0.9);
-  sky.sunLight.position.y = Math.max(sky.sunLight.position.y, 400);
+  // Shadow follow (r8 B6): light + target track the player instead of
+  // sitting over the map origin. Replaces the old fixed position
+  // (sun.position * 0.9, ~4680 m out, far 9000).
+  applyShadowFollow(scene);
   sky.hemi.color.set(fg.hemiSky);
   sky.hemi.groundColor.set(fg.hemiGround);
   sky.hemi.intensity = fg.hemiIntensity;
 
-  scene.fog = new THREE.Fog(fg.fogColor, fg.fogNear, fg.fogFar);
+  // Fog: same params as before, but reuse the object when nothing
+  // changed instead of allocating a new THREE.Fog every frame.
+  if (!sky.fogCache || sky.fogCache.color !== fg.fogColor
+      || sky.fogCache.near !== fg.fogNear || sky.fogCache.far !== fg.fogFar) {
+    scene.fog = new THREE.Fog(fg.fogColor, fg.fogNear, fg.fogFar);
+    sky.fogCache = { color: fg.fogColor, near: fg.fogNear, far: fg.fogFar };
+  }
   scene.background = null; // the dome is the background
 
   for (const c of sky.clouds) c.material.color.set(fg.cloudTint);
@@ -263,11 +343,28 @@ export function setTimeOfDay(scene, grade, world = null) {
 
 // Per-frame sky motion: clouds drift with the wind, the wheel of the pier
 // is the world module's job. `dt` is seconds since the last frame.
+// Also runs the two r8 smoothness levers that need a per-frame tick:
+// the shadow box follows the player (cheap no-op unless the snapped
+// focus moved) and the dynamic-DPR governor steps the pixel ratio
+// down/up through the renderer main3d exposes. Both are guarded so a
+// missing window/renderer (Node, tests) simply skips them.
 export function updateSky(scene, dt) {
   const sky = scene.userData.palmaSky;
   if (!sky) return;
   for (const c of sky.clouds) {
     c.position.x += c.userData.drift * dt;
     if (c.position.x > 5200) c.position.x = -5200;
+  }
+  applyShadowFollow(scene);
+  if (CFG3D.PERF.dynamicDpr !== false) {
+    try {
+      if (typeof window !== 'undefined' && window.__palma3d && window.__palma3d.renderer) {
+        if (!sky.dprGovernor) {
+          sky.dprGovernor = createDprGovernor(window.__palma3d.renderer.getPixelRatio());
+        }
+        const next = sky.dprGovernor.update((dt || 0.016) * 1000);
+        if (next != null) window.__palma3d.renderer.setPixelRatio(next);
+      }
+    } catch (e) { /* DPR is best-effort; never break the frame */ }
   }
 }

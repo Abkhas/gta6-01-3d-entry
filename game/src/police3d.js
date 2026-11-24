@@ -48,6 +48,7 @@
 // (plus AIR-1 for the helicopter and PVPD as the department name).
 
 import { CFG3D as CFG } from './config3d.js';
+import * as THREE from '../vendor/three.module.min.js';
 
 const CALLSIGNS = ['HALCON', 'BRISA', 'FARO', 'MONZON'];
 const TACTIC_CYCLE = ['PIT', 'RAMMING', 'ROADBLOCK', 'FLANKING', 'PIT', 'PURSUIT'];
@@ -74,6 +75,262 @@ const CRUISER_TOP = 40; // m/s
 const BIKE_TOP = 46; // m/s
 const SPAWN_MIN = 90; // never closer than this to the player
 const SPAWN_MAX = 450;
+
+// ---- LAPD black-and-white livery + flashing sirens (r8, B3) ------------
+// A cruiser is a traffic car underneath (vehicles.spawn hands back a
+// random palette colour — the colour argument never reaches it), so
+// the livery is applied here, on the finished body: the paint is
+// re-identified by geometry (main body 4.6 x 0.55 x 2.0, skirt
+// 4.4 x 0.22 x 1.9) and re-dyed black, white door panels + a PVPD
+// door plate are added on both flanks, and a roof bar carries red /
+// blue lenses. The strobe is a shared 0.4 s square wave (2.5 Hz):
+// red on, brief both-off gap, blue on, gap — the two sides never
+// flash together. Glow sprites + an alternating ground pool do the
+// long-distance read (the r6 headlight technique); there is no real
+// PointLight per car. Everything here is guarded: in Node (self-test)
+// there is no document and the stub bodies have no traverse/add, so
+// dressPoliceCruiser returns null and the logic runs bare.
+const POLICE_BLACK = 0x0c0d10;
+const POLICE_SKIRT = 0x07080a;
+const POLICE_WHITE = 0xe8e8e8;
+const SIREN_PERIOD = 0.4; // seconds per red+blue cycle (~2.5 Hz)
+const CAR_HALF_LEN = 2.3; // metres, same 4.6 m body as traffic cars
+const CAR_HALF_WID = 1.0;
+const PLAYER_RADIUS = 0.5; // same radius as main3d's footBlockedAt
+
+let sharedSirenGlowTex = null;
+function sirenGlowTexture() {
+  if (sharedSirenGlowTex) return sharedSirenGlowTex;
+  if (typeof document === 'undefined') return null;
+  const c = document.createElement('canvas');
+  c.width = 128;
+  c.height = 128;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 2, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.3, 'rgba(255,255,255,0.55)');
+  grad.addColorStop(0.7, 'rgba(255,255,255,0.12)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  sharedSirenGlowTex = tex;
+  return tex;
+}
+
+let sharedPvpdTex = null;
+function pvpdDoorTexture() {
+  if (sharedPvpdTex) return sharedPvpdTex;
+  if (typeof document === 'undefined') return null;
+  const c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 64;
+  const g = c.getContext('2d');
+  g.clearRect(0, 0, 256, 64);
+  g.fillStyle = '#0c0d10';
+  g.font = 'bold 40px sans-serif';
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillText('PVPD', 128, 24);
+  g.font = 'bold 17px sans-serif';
+  g.fillText('P O L I C E', 128, 52);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  sharedPvpdTex = tex;
+  return tex;
+}
+
+// Dress a finished traffic-car body as a PVPD cruiser. Returns the
+// siren handles (lens materials, glow sprites, ground pools) for the
+// per-frame strobe, or null when the body is not a real THREE group.
+function dressPoliceCruiser(body) {
+  if (!body || typeof body.add !== 'function' || typeof body.traverse !== 'function') return null;
+  // Black paint: re-dye the shared body + skirt materials, found by
+  // their box size so the random palette colour does not matter.
+  let bodyMat = null;
+  let skirtMat = null;
+  body.traverse((o) => {
+    if (!o || !o.geometry || !o.geometry.parameters || !o.material) return;
+    const p = o.geometry.parameters;
+    if (p.width === 4.6 && p.height === 0.55 && p.depth === 2.0) bodyMat = o.material;
+    if (p.width === 4.4 && p.height === 0.22 && p.depth === 1.9) skirtMat = o.material;
+  });
+  if (bodyMat && bodyMat.color && typeof bodyMat.color.setHex === 'function') {
+    bodyMat.color.setHex(POLICE_BLACK);
+  }
+  if (skirtMat && skirtMat.color && typeof skirtMat.color.setHex === 'function') {
+    skirtMat.color.setHex(POLICE_SKIRT);
+  }
+  // The leaning body subgroup is the first Group child (buildCar
+  // adds it first); livery + bar lean with the suspension. The
+  // ground pools go on the top group so they stay on the asphalt.
+  let inner = body;
+  if (Array.isArray(body.children)) {
+    for (const ch of body.children) {
+      if (ch && ch.isGroup) { inner = ch; break; }
+    }
+  }
+  const whiteMat = new THREE.MeshStandardMaterial({
+    color: POLICE_WHITE, roughness: 0.35, metalness: 0.6,
+  });
+  const doorTex = pvpdDoorTexture();
+  for (const s of [1, -1]) {
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.48, 0.03), whiteMat);
+    panel.position.set(-0.15, 0.58, 1.015 * s);
+    inner.add(panel);
+    if (doorTex) {
+      const plate = new THREE.Mesh(
+        new THREE.PlaneGeometry(1.25, 0.31),
+        new THREE.MeshBasicMaterial({ map: doorTex, transparent: true, depthWrite: false }),
+      );
+      plate.position.set(-0.15, 0.58, 1.035 * s);
+      if (s < 0) plate.rotation.y = Math.PI;
+      inner.add(plate);
+    }
+  }
+  // Roof light bar: dark base, red lens one side, blue the other,
+  // steady white takedown lens in the middle.
+  const barBase = new THREE.Mesh(
+    new THREE.BoxGeometry(0.34, 0.10, 1.30),
+    new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.4, metalness: 0.6 }),
+  );
+  barBase.position.set(-0.15, 1.46, 0);
+  inner.add(barBase);
+  const redMat = new THREE.MeshStandardMaterial({
+    color: 0x550000, emissive: 0xff1a1a, emissiveIntensity: 0.15, roughness: 0.3, metalness: 0.1,
+  });
+  const blueMat = new THREE.MeshStandardMaterial({
+    color: 0x000a55, emissive: 0x1a3cff, emissiveIntensity: 0.15, roughness: 0.3, metalness: 0.1,
+  });
+  const redLens = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.09, 0.56), redMat);
+  redLens.position.set(-0.15, 1.47, 0.32);
+  inner.add(redLens);
+  const blueLens = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.09, 0.56), blueMat);
+  blueLens.position.set(-0.15, 1.47, -0.32);
+  inner.add(blueLens);
+  const takeMat = new THREE.MeshStandardMaterial({
+    color: 0x555544, emissive: 0xfff2c0, emissiveIntensity: 0.6, roughness: 0.3, metalness: 0.1,
+  });
+  const takeLens = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.08, 0.14), takeMat);
+  takeLens.position.set(-0.15, 1.47, 0);
+  inner.add(takeLens);
+  // A-pillar spotlight on the driver's flank: a small white cylinder
+  // + a steady emissive dot.
+  const spot = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.06, 0.06, 0.22, 10),
+    new THREE.MeshStandardMaterial({ color: 0xd8d8d8, roughness: 0.3, metalness: 0.8 }),
+  );
+  spot.rotation.x = Math.PI / 2;
+  spot.position.set(0.75, 1.18, 1.04);
+  inner.add(spot);
+  const spotDot = new THREE.Mesh(
+    new THREE.SphereGeometry(0.035, 8, 8),
+    new THREE.MeshStandardMaterial({
+      color: 0x444422, emissive: 0xfff2c0, emissiveIntensity: 1.2, roughness: 0.3, metalness: 0.1,
+    }),
+  );
+  spotDot.position.set(0.75, 1.18, 1.16);
+  inner.add(spotDot);
+  // Glow sprites at the bar ends + one red / one blue ground pool.
+  // Without a glow texture (Node) the lenses still strobe.
+  const glowTex = sirenGlowTexture();
+  let redSprite = null;
+  let blueSprite = null;
+  let redPool = null;
+  let bluePool = null;
+  if (glowTex) {
+    const mkSprite = (color, z) => {
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: glowTex, color, transparent: true, opacity: 0.04,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }));
+      sp.scale.set(1.7, 1.7, 1);
+      sp.position.set(-0.15, 1.55, z);
+      inner.add(sp);
+      return sp;
+    };
+    redSprite = mkSprite(0xff2a2a, 0.55);
+    blueSprite = mkSprite(0x2a55ff, -0.55);
+    const mkPool = (color) => {
+      const m = new THREE.Mesh(
+        new THREE.PlaneGeometry(5.2, 3.6),
+        new THREE.MeshBasicMaterial({
+          map: glowTex, color, transparent: true, opacity: 0.02,
+          blending: THREE.AdditiveBlending, depthWrite: false,
+        }),
+      );
+      m.rotation.x = -Math.PI / 2;
+      m.position.set(0, 0.06, 0);
+      m.renderOrder = 1;
+      body.add(m);
+      return m;
+    };
+    redPool = mkPool(0xff2222);
+    bluePool = mkPool(0x2244ff);
+  }
+  return { redMat, blueMat, redSprite, blueSprite, redPool, bluePool };
+}
+
+// ---- police car vs on-foot player contact (r8, B3) ---------------------
+// r7's footBlockedAt stops the PLAYER walking into a car; it does
+// nothing about a MOVING police car driving through a standing
+// player. That is closed here, inside the police update: a cruiser
+// that reaches the player stops dead and shoves the player clear to
+// the side — it never passes through. Only the on-foot player: when
+// Rey is driving, contactHits already bends his car and cuts its
+// speed, and pursuit behaviour there stays exactly as it was.
+// Overlap test in the car's local frame: nose axis + flank axis,
+// half extents plus the player's radius.
+function carPlayerOverlap(unit, player) {
+  if (!player || player.vehicle) return null;
+  if (typeof player.x !== 'number' || typeof player.z !== 'number') return null;
+  const dx = player.x - unit.x;
+  const dz = player.z - unit.z;
+  const c = Math.cos(unit.angle);
+  const s = Math.sin(unit.angle);
+  const lx = dx * c + dz * s;
+  const lz = -dx * s + dz * c;
+  const ex = CAR_HALF_LEN + PLAYER_RADIUS;
+  const ez = CAR_HALF_WID + PLAYER_RADIUS;
+  if (Math.abs(lx) >= ex || Math.abs(lz) >= ez) return null;
+  return { lx, lz, penX: ex - Math.abs(lx), penZ: ez - Math.abs(lz) };
+}
+
+// Shove the player clear of the car's footprint, to the side first
+// (out of the car's path, not along it), then nose/tail if the sides
+// are blocked. Never pushes the player into a building: each
+// candidate is checked against the world, and if every side is solid
+// the player is left where they are — the car is stopped anyway, and
+// main3d's anti-trap rule lets them walk out.
+function pushPlayerOut(unit, player, ov, isSolid) {
+  const c = Math.cos(unit.angle);
+  const s = Math.sin(unit.angle);
+  const fx = c;
+  const fz = s;
+  const sx = -s;
+  const sz = c;
+  const sideSign = ov.lz >= 0 ? 1 : -1;
+  const noseSign = ov.lx >= 0 ? 1 : -1;
+  const d = ov.penZ + 0.05;
+  const e = ov.penX + 0.05;
+  const tries = [
+    [sx * sideSign * d, sz * sideSign * d],
+    [-sx * sideSign * d, -sz * sideSign * d],
+    [fx * noseSign * e, fz * noseSign * e],
+    [-fx * noseSign * e, -fz * noseSign * e],
+  ];
+  for (const [px, pz] of tries) {
+    const nx = player.x + px;
+    const nz = player.z + pz;
+    if (!isSolid(nx, nz)) {
+      player.x = nx;
+      player.z = nz;
+      return true;
+    }
+  }
+  return false;
+}
 
 function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
@@ -430,6 +687,16 @@ export function createPoliceSystem(world, vehicles) {
       if (base.body) {
         base.body.policeUnit = true;
         base.body.topSpeed = spec.kind === 'bike' ? BIKE_TOP : CRUISER_TOP;
+        // Cruisers only: black-and-white livery + flashing bar.
+        // Bikes keep the plain traffic body. Dressing never throws:
+        // a failure leaves a plain dark cruiser, never a dead unit.
+        if (spec.kind === 'cruiser') {
+          try {
+            base.siren = dressPoliceCruiser(base.body);
+          } catch (e) {
+            base.siren = null;
+          }
+        }
       }
     }
     return base;
@@ -478,11 +745,42 @@ export function createPoliceSystem(world, vehicles) {
     unit.body.speed = unit.speed;
   }
 
+  // One siren strobe step, from the shared phase clock: red on for
+  // the first 40% of the 0.4 s cycle, both off briefly, blue on for
+  // the next 40%, both off again. All units share sys.time, so the
+  // fleet strobes in sync like a real pursuit.
+  function updateSiren(unit) {
+    const s = unit.siren;
+    if (!s) return;
+    const p = (((sys.time / SIREN_PERIOD) % 1) + 1) % 1;
+    const redOn = p < 0.4;
+    const blueOn = p >= 0.5 && p < 0.9;
+    if (s.redMat) s.redMat.emissiveIntensity = redOn ? 3.5 : 0.15;
+    if (s.blueMat) s.blueMat.emissiveIntensity = blueOn ? 3.5 : 0.15;
+    if (s.redSprite) s.redSprite.material.opacity = redOn ? 0.9 : 0.04;
+    if (s.blueSprite) s.blueSprite.material.opacity = blueOn ? 0.9 : 0.04;
+    if (s.redPool) s.redPool.material.opacity = redOn ? 0.5 : 0.02;
+    if (s.bluePool) s.bluePool.material.opacity = blueOn ? 0.5 : 0.02;
+  }
+
   // One cruiser or bike, one frame of driving. Chasers aim at Rey,
   // flankers aim at a point off his shoulder, PIT units pull alongside
   // and steer into his rear quarter, and the roadblock car races ahead
   // of him and parks sideways across the street.
   function driveVehicle(unit, player, dt) {
+    // Never drive through a standing player: already overlapping at
+    // the top of the frame, hold still and shove them clear instead
+    // of rolling on. Covers every role/tactic, including the
+    // roadblock car parking sideways and units driving away.
+    if (!player.vehicle) {
+      const standing = carPlayerOverlap(unit, player);
+      if (standing) {
+        unit.speed = 0;
+        pushPlayerOut(unit, player, standing, w.isSolid);
+        syncBody(unit);
+        return;
+      }
+    }
     let tx;
     let ty;
     if (unit.leaving) {
@@ -553,10 +851,24 @@ export function createPoliceSystem(world, vehicles) {
     unit.speed = Math.max(0, unit.speed);
     let nx = unit.x + Math.cos(unit.angle) * unit.speed * dt;
     let nz = unit.z + Math.sin(unit.angle) * unit.speed * dt;
+    const ox = unit.x;
+    const oz = unit.z;
     if (!w.isSolid(nx, unit.z)) unit.x = nx;
     else unit.speed *= 0.5;
     if (!w.isSolid(unit.x, nz)) unit.z = nz;
     else unit.speed *= 0.5;
+    // This step carried the car onto the player: stay where the step
+    // started, stop dead, and shove them clear to the side. The car
+    // never ends a frame overlapping the player.
+    if (!player.vehicle) {
+      const hit = carPlayerOverlap(unit, player);
+      if (hit) {
+        unit.x = ox;
+        unit.z = oz;
+        unit.speed = 0;
+        pushPlayerOut(unit, player, hit, w.isSolid);
+      }
+    }
     syncBody(unit);
   }
 
@@ -877,6 +1189,7 @@ export function createPoliceSystem(world, vehicles) {
       }
     }
     updateHeli(player, dt);
+    for (const u of sys.units) updateSiren(u);
     contactHits(player, dt);
 
     // Sight: any unit (or AIR-1) with eyes on Rey refreshes the last

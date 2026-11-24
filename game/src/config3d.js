@@ -140,6 +140,26 @@ export const CFG3D = {
   // ---- day/night clock --------------------------------------------------
   DAY_LENGTH_S: 480,        // one full day cycle in seconds of play
   DAY_START_HOUR: 9.5,      // the game opens mid-morning
+
+  // ---- perf (r8 B6 — smoothness) ---------------------------------------
+  // Shadow box + dynamic DPR. Shadow: was a 2048 map over the whole
+  // ±1600 m city (1.56 m/texel, every caster re-rendered every
+  // frame); now a 1024 map over a ±160 m box that follows the player
+  // (0.31 m/texel, near casters only). DPR: step down the ladder
+  // while frames stay slow, step back up when they recover.
+  PERF: {
+    SHADOW_HALF: 160,          // shadow camera half-extent (m) — ~320 m box
+    SHADOW_MAP_SIZE: 1024,     // was 2048 over ±1600 m
+    SHADOW_FOLLOW_DIST: 1200,  // sun light rides this far out along the sun ray
+    SHADOW_SNAP: 8,            // snap the follow focus to this grid (m) — no shimmer
+    SHADOW_DEFAULT_FOCUS: { x: -800, z: 600 }, // player spawn (title screen)
+    DPR_LEVELS: [2, 1.5, 1.25, 1],
+    DPR_DROP_MS: 20,           // step down if EMA frame time exceeds this…
+    DPR_DROP_HOLD_S: 2,        // …sustained this long
+    DPR_RECOVER_MS: 13,        // step back up if EMA frame time is under this…
+    DPR_RECOVER_HOLD_S: 4,     // …sustained this long
+    dynamicDpr: true,          // false pins DPR (coordinator/main-side wiring)
+  },
 };
 
 // District lookup: returns the district record for a world (x, z), or null
@@ -176,4 +196,41 @@ export function gradeBlend(hour) {
     if (h >= a && h < b) return { from: CFG3D.GRADES[from], to: CFG3D.GRADES[to], t: (h - a) / (b - a) };
   }
   return { from: gradeForHour(h), to: gradeForHour(h), t: 0 };
+}
+
+// Dynamic-DPR governor (r8 B6). Pure logic, no DOM/renderer: feed it
+// each frame's dt (ms) and it returns the new pixel ratio when a step
+// is due, else null. Steps down CFG3D.PERF.DPR_LEVELS while the EMA
+// frame time stays slow, steps back up when it stays fast. The
+// renderer itself is applied by the caller (sky3d.updateSky applies
+// it through the renderer main3d exposes; a main-side wiring can call
+// this directly instead — either way, setPixelRatio only on change).
+export function createDprGovernor(startRatio) {
+  const levels = CFG3D.PERF.DPR_LEVELS;
+  let idx = levels.length - 1;
+  for (let i = 0; i < levels.length; i++) {
+    if (levels[i] <= (startRatio || 1) + 1e-6) { idx = i; break; }
+  }
+  let ema = 16;
+  let slowS = 0;
+  let fastS = 0;
+  return {
+    get ratio() { return levels[idx]; },
+    update(dtMs) {
+      const dt = Math.min(Math.max(dtMs || 16, 1), 250);
+      ema += (dt - ema) * 0.05;
+      if (ema > CFG3D.PERF.DPR_DROP_MS) { slowS += dt / 1000; fastS = 0; }
+      else if (ema < CFG3D.PERF.DPR_RECOVER_MS) { fastS += dt / 1000; slowS = 0; }
+      else { slowS = 0; fastS = 0; }
+      if (slowS >= CFG3D.PERF.DPR_DROP_HOLD_S && idx < levels.length - 1) {
+        idx++; slowS = 0; fastS = 0; ema = 16;
+        return levels[idx];
+      }
+      if (fastS >= CFG3D.PERF.DPR_RECOVER_HOLD_S && idx > 0) {
+        idx--; slowS = 0; fastS = 0; ema = 16;
+        return levels[idx];
+      }
+      return null;
+    },
+  };
 }

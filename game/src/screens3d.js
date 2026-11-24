@@ -715,6 +715,13 @@
   // front. Menu left, save slots with progress right.
 
   var titleRoot = null;
+  // Mouse hover remembers the shared menu selection across title
+  // re-renders (main3d rebuilds the title on every Left/Right arrow
+  // and never passes selectedMenu, so without this a hover selection
+  // would reset to CONTINUE on the next slot move). The keyboard
+  // never writes it — Enter always starts the game — so hover and
+  // keyboard can never disagree about what Enter does.
+  var lastMenuSel = 0;
 
   function showTitle(state, city, opts) {
     hideTitle();
@@ -786,11 +793,47 @@
     setText(tagline, 'Rey Calder owes Nadia Venn $2,000. The city is open.');
 
     var menu = ['CONTINUE', 'NEW GAME', 'LOAD GAME', 'SETTINGS'];
-    var sel = (opts && typeof opts.selectedMenu === 'number') ? opts.selectedMenu : 0;
+    var sel = (opts && typeof opts.selectedMenu === 'number') ? opts.selectedMenu : lastMenuSel;
     var menuBox = el('div', 'pv3d-panel pv3d-title-menu', stage);
+    var menuItems = [];
+    // One shared selection: mouse hover writes the same sel the
+    // render reads, and a click fires the exact Enter handler.
+    // main3d is a module, so its start function is not reachable
+    // from this classic script — a synthetic Enter keydown on
+    // window is the in-scope route to it (main3d listens for
+    // keydown Enter on window; the event is indistinguishable to
+    // that handler from a physical Enter press).
+    function paintMenu() {
+      for (var pi = 0; pi < menuItems.length; pi++) {
+        if (pi === sel) menuItems[pi].classList.add('pv3d-title-menu-selected');
+        else menuItems[pi].classList.remove('pv3d-title-menu-selected');
+        setText(menuItems[pi], (pi === sel ? '▸ ' : '   ') + menu[pi]);
+      }
+    }
+    function activateMenu() {
+      var ev = null;
+      try {
+        ev = new window.KeyboardEvent('keydown', { code: 'Enter', key: 'Enter', bubbles: true });
+      } catch (e) { ev = null; }
+      if (ev) window.dispatchEvent(ev);
+    }
     for (var m = 0; m < menu.length; m++) {
-      var item = el('div', 'pv3d-title-menu-item' + (m === sel ? ' pv3d-title-menu-selected' : ''), menuBox);
-      setText(item, (m === sel ? '▸ ' : '   ') + menu[m]);
+      (function (mi) {
+        var item = el('div', 'pv3d-title-menu-item' + (mi === sel ? ' pv3d-title-menu-selected' : ''), menuBox);
+        setText(item, (mi === sel ? '▸ ' : '   ') + menu[mi]);
+        menuItems.push(item);
+        item.addEventListener('mouseenter', function () {
+          sel = mi;
+          lastMenuSel = mi;
+          paintMenu();
+        });
+        item.addEventListener('click', function () {
+          sel = mi;
+          lastMenuSel = mi;
+          paintMenu();
+          activateMenu();
+        });
+      })(m);
     }
 
     var slots = readSlots(opts);
@@ -803,12 +846,44 @@
     var slotsBox = el('div', 'pv3d-title-slots', stage);
     setText(el('div', 'pv3d-title-slots-head', slotsBox), 'SAVE SLOTS');
     var clockNow = clockStr(state.clockMinutes);
+    var slotCards = [];
+    function paintSlots() {
+      for (var psi = 0; psi < slotCards.length; psi++) {
+        if (psi === selected) slotCards[psi].classList.add('pv3d-slot-selected');
+        else slotCards[psi].classList.remove('pv3d-slot-selected');
+      }
+    }
     for (var i = 0; i < 3; i++) {
-      slotsBox.appendChild(slotCard(slots[i] || { slot: i + 1, empty: true }, i === selected, clockNow));
+      (function (si) {
+        var card = slotCard(slots[si] || { slot: si + 1, empty: true }, si === selected, clockNow);
+        slotsBox.appendChild(card);
+        slotCards.push(card);
+        // Click a slot = select it: writes the same state.titleSlot
+        // the Left/Right arrows write, so mouse and keyboard share
+        // one selection. Double-click = load it, the same Enter
+        // activation as the menu. (Systems-screen slots are
+        // display-only and are deliberately left untouched.)
+        card.addEventListener('mouseenter', function () {
+          selected = si;
+          state.titleSlot = si;
+          paintSlots();
+        });
+        card.addEventListener('click', function () {
+          selected = si;
+          state.titleSlot = si;
+          paintSlots();
+        });
+        card.addEventListener('dblclick', function () {
+          selected = si;
+          state.titleSlot = si;
+          paintSlots();
+          activateMenu();
+        });
+      })(i);
     }
 
     var foot = el('div', 'pv3d-title-foot', stage);
-    setText(foot, 'PRESS ENTER TO START  ·  ARROWS PICK A SLOT');
+    setText(foot, 'CLICK OR PRESS ENTER TO START  ·  ARROWS / MOUSE PICK A SLOT');
     var controls = el('div', 'pv3d-title-controls', stage);
     setText(controls, 'WASD walk / drive   ·   E enter & exit car / start mission   ·   Hold RMB to aim, LMB fire   ·   R reload   ·   Q radio   ·   Z / X / V crew   ·   Esc pause   ·   F9 save');
     var meta = el('div', 'pv3d-title-meta', stage);
@@ -941,9 +1016,10 @@
       '.pv3d-title-stage{position:absolute;left:0;top:0;width:1280px;height:720px}',
       '.pv3d-title-headline{position:absolute;left:48px;top:80px;font-size:64px;font-weight:800;color:#ffd166;letter-spacing:2px;text-shadow:0 2px 12px rgba(0,0,0,0.6)}',
       '.pv3d-title-tagline{position:absolute;left:50px;top:152px;font-size:20px;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',
-      '.pv3d-title-menu{position:absolute;left:40px;top:260px;width:320px;padding:12px 16px}',
-      '.pv3d-title-menu-item{font-size:20px;font-weight:700;padding:10px 6px;color:#e8e8e8}',
+      '.pv3d-title-menu{position:absolute;left:40px;top:260px;width:320px;padding:12px 16px;user-select:none}',
+      '.pv3d-title-menu-item{font-size:20px;font-weight:700;padding:10px 6px;color:#e8e8e8;cursor:pointer;user-select:none}',
       '.pv3d-title-menu-selected{color:#ffd166}',
+      '.pv3d-title-menu-item:hover{color:#ffd166}',
       // Save slots moved left + down off the right edge: at right:48
       // the sun disc (left 72%, top 44% -> x922-990, y317-385) sat
       // squarely behind save slot 2 and glowed through its panel.
@@ -952,7 +1028,8 @@
       // above the footer. The sun itself is untouched.
       '.pv3d-title-slots{position:absolute;right:440px;top:190px;width:452px}',
       '.pv3d-title-slots-head{font-size:15px;font-weight:700;color:#ffd166;margin-bottom:4px}',
-      '.pv3d-title-slots .pv3d-slot{height:104px}',
+      '.pv3d-title-slots .pv3d-slot{height:104px;cursor:pointer;user-select:none}',
+      '.pv3d-title-slots .pv3d-slot:hover{border-color:#ffd166}',
       '.pv3d-title-foot{position:absolute;left:0;right:0;bottom:88px;text-align:center;font-size:17px;font-weight:700;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,0.6)}',
       '.pv3d-title-controls{position:absolute;left:0;right:0;bottom:56px;text-align:center;font-size:14px;color:#c9d2e0}',
       '.pv3d-title-meta{position:absolute;left:24px;bottom:24px;font-size:13px;color:#8a8a92}'

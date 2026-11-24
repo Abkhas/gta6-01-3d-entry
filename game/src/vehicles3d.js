@@ -115,15 +115,48 @@ function glowSprite(color, size) {
 // A flat additive quad lying on the asphalt, for beam splashes and
 // light pools. The radial texture stretched over the plane fades the
 // edges to nothing, so there is no hard rectangle on the road.
-function groundGlow(color, w, d) {
+// `tex` overrides the shared circular glow: the beam/pool pass an
+// elongated gradient so the pool reads as a long soft wash on the
+// road, not a squashed disc.
+function groundGlow(color, w, d, tex) {
   var mat = new THREE.MeshBasicMaterial({
-    map: glowTexture(), color: color, transparent: true, opacity: 0.4,
+    map: tex || glowTexture(), color: color, transparent: true, opacity: 0.4,
     blending: THREE.AdditiveBlending, depthWrite: false
   });
   var m = new THREE.Mesh(new THREE.PlaneGeometry(w, d), mat);
   m.rotation.x = -Math.PI / 2;
   m.renderOrder = 1;
   return m;
+}
+
+// An elongated soft gradient for the headlight beam/pool: the
+// shared circular glow texture stretched over a long quad collapses
+// into a wedge at a grazing angle, so the beam gets its own
+// texture — a radial falloff drawn once, then stretched 2:1, so
+// the pool fades softly along its length and across its width.
+var sharedBeamTex = null;
+function beamTexture() {
+  if (sharedBeamTex) return sharedBeamTex;
+  var s = document.createElement('canvas');
+  s.width = 128;
+  s.height = 128;
+  var sg = s.getContext('2d');
+  var grad = sg.createRadialGradient(64, 64, 2, 64, 64, 64);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.35, 'rgba(255,255,255,0.5)');
+  grad.addColorStop(0.75, 'rgba(255,255,255,0.10)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  sg.fillStyle = grad;
+  sg.fillRect(0, 0, 128, 128);
+  var c = document.createElement('canvas');
+  c.width = 256;
+  c.height = 128;
+  var g = c.getContext('2d');
+  g.drawImage(s, 0, 0, 256, 128);
+  var tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  sharedBeamTex = tex;
+  return tex;
 }
 
 // ---- cars --------------------------------------------------------
@@ -178,7 +211,7 @@ function makeWheel(detailed) {
 }
 
 // One builder for every car in the city. detail 3 is the hero:
-// racing stripe, spoiler, mirrors, spoked wheels, headlight cones.
+// racing stripe, spoiler, mirrors, spoked wheels.
 // detail 1 is traffic: same body and glass, fewer meshes.
 function buildCar(color, detailed) {
   var group = new THREE.Group();
@@ -193,10 +226,15 @@ function buildCar(color, detailed) {
   // near end — the headlights' answer to the street-lamp pools.
   // Both sit just above the contact shadow (y 0.02) so they never
   // z-fight it, and both are driven by applyLampLevels below.
-  var beam = groundGlow(0xaac8ff, 10.5, 3.4);
+  // GTA V approach: NO volumetric cone in the air — the beam IS the
+  // pool on the road plus the lens glow. The old additive cones
+  // were deleted in r8: a cone's silhouette is a triangle from the
+  // side, exactly the angle live play sees. Both quads use the
+  // elongated beam texture so the pool fades softly, never wedged.
+  var beam = groundGlow(0xaac8ff, 11.5, 3.8, beamTexture());
   beam.position.set(2.3 + 5.2, 0.04, 0);
   group.add(beam);
-  var pool = groundGlow(0xcfe0ff, 7.0, 4.6);
+  var pool = groundGlow(0xcfe0ff, 8.0, 5.0, beamTexture());
   pool.position.set(2.3 + 3.2, 0.05, 0);
   group.add(pool);
 
@@ -253,10 +291,35 @@ function buildCar(color, detailed) {
   tailMat.emissiveIntensity = 1.5; // taillights glow from behind
   body.add(box(0.06, 0.18, 0.40, headMat, 2.31, 0.62, 0.62));
   body.add(box(0.06, 0.18, 0.40, headMat, 2.31, 0.62, -0.62));
-  body.add(box(0.06, 0.16, 0.42, tailMat, -2.31, 0.62, 0.62));
-  body.add(box(0.06, 0.16, 0.42, tailMat, -2.31, 0.62, -0.62));
+  body.add(box(0.06, 0.16, 0.42, tailMat, -2.33, 0.62, 0.62));
+  body.add(box(0.06, 0.16, 0.42, tailMat, -2.33, 0.62, -0.62));
   // Full-width rear light bar joining the taillights.
-  body.add(box(0.05, 0.10, 1.5, tailMat, -2.32, 0.62, 0));
+  body.add(box(0.05, 0.10, 1.5, tailMat, -2.335, 0.62, 0));
+  // Rear fascia: a dark full-width panel across the rear face
+  // behind the lamps, so the back of the car reads as a designed
+  // rear end — lamps, bar and plate mounted on black — instead of
+  // one flat painted slab. The lamps/bar above sit proud of it.
+  body.add(box(0.03, 0.36, 1.96, darkMat(), -2.30, 0.61, 0));
+  // Bright trim strip under the lamps, above the bumper.
+  body.add(box(0.02, 0.04, 1.9,
+    paint(0xc0c0c0, 0.3, 0.9), -2.32, 0.40, 0));
+  // Wrap-around tail segments on the rear quarters, so the red
+  // reads from the rear three-quarter chase view, not just dead
+  // behind — the lamps turn the corner instead of stopping at it.
+  body.add(box(0.5, 0.16, 0.04, tailMat, -2.05, 0.62, 1.01));
+  body.add(box(0.5, 0.16, 0.04, tailMat, -2.05, 0.62, -1.01));
+  // Low rear reflectors on the diffuser, flanking the exhausts.
+  body.add(box(0.04, 0.07, 0.28, tailMat, -2.36, 0.20, 0.80));
+  body.add(box(0.04, 0.07, 0.28, tailMat, -2.36, 0.20, -0.80));
+  // C-pillar strips framing the rear glass, and a rear wiper on
+  // it, so the glasshouse reads as glass with pillars from behind.
+  body.add(box(0.06, 0.44, 0.12, bodyMat, -1.32, 1.08, 0.82));
+  body.add(box(0.06, 0.44, 0.12, bodyMat, -1.32, 1.08, -0.82));
+  body.add(box(0.02, 0.03, 0.5, darkMat(), -1.345, 0.95, 0));
+  // Mudflaps behind the rear wheels — dark shapes flanking the
+  // bumper that break the body's lower edge from behind.
+  body.add(box(0.04, 0.32, 0.42, darkMat(), -1.84, 0.32, 1.0));
+  body.add(box(0.04, 0.32, 0.42, darkMat(), -1.84, 0.32, -1.0));
   // Lamp glow: near-white sprites on the headlights, red sprites on
   // the taillights, sitting just proud of the lamp faces. Sprites
   // face the camera, so the lamps bloom from the front, the side,
@@ -291,12 +354,13 @@ function buildCar(color, detailed) {
     pipe.position.set(-2.34, 0.16, 0.55 * ex);
     body.add(pipe);
   }
+  // Licence plate in a dark frame, mounted on the fascia panel.
+  body.add(box(0.02, 0.24, 0.65, darkMat(), -2.33, 0.45, 0));
   body.add(box(0.03, 0.18, 0.55,
     new THREE.MeshStandardMaterial({
       color: 0xe8e8e8, roughness: 0.5, metalness: 0.1
-    }), -2.32, 0.45, 0));
+    }), -2.345, 0.45, 0));
 
-  var cones = [];
   if (detailed) {
     // Racing stripe down the centre line, hood to trunk.
     var stripeMat = new THREE.MeshBasicMaterial({
@@ -321,21 +385,15 @@ function buildCar(color, detailed) {
     // Side mirrors.
     body.add(box(0.12, 0.10, 0.16, bodyMat, 0.75, 1.0, 1.0));
     body.add(box(0.12, 0.10, 0.16, bodyMat, 0.75, 1.0, -1.0));
-    // Headlight cones spilling forward onto the road.
-    for (var s = -1; s <= 1; s += 2) {
-      var cone = new THREE.Mesh(
-        new THREE.ConeGeometry(0.55, 3.4, 12, 1, true),
-        new THREE.MeshBasicMaterial({
-          color: 0xfff0b0, transparent: true, opacity: 0.07,
-          blending: THREE.AdditiveBlending, depthWrite: false,
-          side: THREE.DoubleSide
-        })
-      );
-      cone.rotation.z = -Math.PI / 2; // apex back at the lamp, base forward
-      cone.position.set(2.3 + 1.7, 0.5, 0.62 * s);
-      body.add(cone);
-      cones.push(cone);
-    }
+    // Hero rear: a roof lip over the rear glass and a lower rear
+    // valance under the diffuser, so the silhouette breaks at the
+    // top and the bottom as well as at the lamps.
+    body.add(box(0.3, 0.04, 1.5, skirtMat, -1.25, 1.40, 0));
+    body.add(box(0.14, 0.10, 1.9, skirtMat, -2.30, 0.12, 0));
+    // NOTE (r8): no headlight cones here any more. The old additive
+    // ConeGeometry meshes were deleted — a cone's silhouette IS a
+    // triangle from the side, which is exactly the angle live play
+    // sees. The beam is the ground pool + lens glow only (GTA V).
   }
 
   // Wheels: four, each spinning on its own axle.
@@ -417,11 +475,10 @@ function buildCar(color, detailed) {
     headGlowR.material.opacity = 0.15 + 0.75 * nf;
     tailGlowL.material.opacity = 0.3 + 0.5 * nf + brakeF * 0.35;
     tailGlowR.material.opacity = 0.3 + 0.5 * nf + brakeF * 0.35;
-    beam.material.opacity = 0.3 * nf;
-    pool.material.opacity = 0.55 * nf;
-    for (var i = 0; i < cones.length; i++) {
-      cones[i].material.opacity = lightsOn ? 0.07 + 0.11 * nightF : 0.07;
-    }
+    beam.material.opacity = 0.38 * nf;
+    pool.material.opacity = 0.65 * nf;
+    // r8: the headlight cones are gone (deleted above) — no cone
+    // opacity to drive any more. Beam = pool + lens glow only.
   }
 
   group.userData.setLights = function (on, night) {
@@ -461,8 +518,8 @@ export function createHeroCar() {
   return buildCar('#ff4f3d', true);
 }
 
-// Traffic: same assembly, cheaper (no stripe, spoiler, mirrors,
-// spokes or light cones), in a street colour. Pass a colour, or one
+// Traffic: same assembly, cheaper (no stripe, spoiler, mirrors
+// or spokes), in a street colour. Pass a colour, or one
 // is picked from the roster palette in turn so the street varies.
 export function createTrafficCar(color) {
   var c = color;
